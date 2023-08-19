@@ -4,11 +4,12 @@
 #include <immintrin.h>
 #include <iomanip>
 #include <iostream>
+#include <stdint.h>
 #include <string_view>
 #include <tuple>
 #include <vector>
 
-// #define class struct
+#define class struct
 
 // namespace libdivide {
 
@@ -213,6 +214,17 @@ public:
     _size = size;
   }
 
+  void init(uint64_t *data, size_t size) {
+    _begin = data;
+    _size = size;
+    _capacity = 0;
+  }
+  void forget() {
+    _begin = _inline_storage;
+    _size = 0;
+    _capacity = INLINE_STORAGE_SIZE;
+  }
+
   SmallVec(const SmallVec &rhs) {
     if (rhs._size <= INLINE_STORAGE_SIZE) {
       _begin = _inline_storage;
@@ -288,6 +300,18 @@ public:
     }
     std::fill(_begin + _size, _begin + new_size, 0);
     _size = new_size;
+  }
+  void ensure_size(size_t new_size) {
+    if (new_size <= _size) {
+      return;
+    }
+    increase_size(new_size);
+  }
+  void ensure_size_zerofill(size_t new_size) {
+    if (new_size <= _size) {
+      return;
+    }
+    increase_size_zerofill(new_size);
   }
   void set_size(size_t size) { _size = size; }
 
@@ -386,7 +410,7 @@ class BigInt {
                       max_block_len);
   }
 
-  static void add_at(BigInt &lhs, const BigInt &rhs, size_t offset) {
+  static void add_at_no_resize(BigInt &lhs, const BigInt &rhs, size_t offset) {
     if (__builtin_expect(rhs.data.empty(), 0)) {
       return;
     }
@@ -404,55 +428,44 @@ class BigInt {
         "inc %[i];"
         "dec %[loop_count];"
         "jnz 1b;"
-        "mov $0, %[value];"
-        "adc $0, %[value];"
+        "jnc 2f;"
+        "3:"
+        "addq $1, (%[data_ptr],%[i],8);"
+        "inc %[i];"
+        "jc 3b;"
+        "2:"
         : [i] "+r"(i), [value] "+r"(value), [loop_count] "+r"(loop_count)
         : [data_ptr] "r"(ldata), [rhs_data_ptr] "r"(rhs.data.data())
         : "flags", "memory");
+  }
 
-    if (lsize < rhs.data.size()) {
-      lhs.data.increase_size(rhs.data.size());
-      ldata = lhs.data.data() + offset;
-      if (value) {
-        while (i < rhs.data.size() &&
-               rhs.data[i] == static_cast<uint64_t>(-1)) {
-          ldata[i] = 0;
-          i++;
-        }
-        if (__builtin_expect(i == rhs.data.size(), 0)) {
-          lhs.data.push_back(1);
-        } else {
-          ldata[i] = rhs.data[i] + 1;
-          i++;
-        }
-      }
-      std::copy(rhs.data.begin() + i, rhs.data.end(), ldata + i);
-    } else {
-      if (value) {
-        for (; i < lsize; i++) {
-          ldata[offset]++;
-          if (ldata[offset] != 0) {
-            break;
-          }
-        }
-        if (__builtin_expect(i == lsize, 0)) {
-          lhs.data.push_back(1);
-        }
-      }
+  static void mul_1x1(BigInt &result, const BigInt &lhs, const BigInt &rhs, size_t offset) {
+    __uint128_t product = __uint128_t{lhs.data[0]} * rhs.data[0];
+    result.data[offset] = static_cast<uint64_t>(product);
+    if (product >= (__uint128_t{1} << 64)) {
+      result.data[offset + 1] = static_cast<uint64_t>(product >> 64);
     }
   }
 
-  static BigInt mul_1x1(const BigInt &lhs, const BigInt &rhs) {
-    return __uint128_t{lhs.data[0]} * rhs.data[0];
+  static void mul_nx1(BigInt &result, const BigInt &lhs, uint64_t rhs, size_t offset) {
+    uint64_t carry = 0;
+    for (size_t i = 0; i < lhs.data.size(); i++) {
+      __uint128_t total = __uint128_t{lhs.data[i]} * rhs + carry;
+      result.data[offset + i] = static_cast<uint64_t>(total);
+      carry = total >> 64;
+    }
+    if (carry != 0) {
+      result.data[offset + lhs.data.size()] = carry;
+    }
   }
 
-  static BigInt mul_quadratic(const BigInt &lhs, const BigInt &rhs) {
-    BigInt res;
-    res.data.increase_size_zerofill(lhs.data.size() + rhs.data.size() - 1);
+  __attribute__((noinline))
+  static void mul_quadratic(BigInt& result, const BigInt &lhs, const BigInt &rhs, size_t offset) {
+    size_t size = lhs.data.size() + rhs.data.size() - 1;
 
     uint64_t carry_low = 0;
     uint64_t carry_high = 0;
-    for (size_t i = 0; i < res.data.size(); i++) {
+    for (size_t i = 0; i < size; i++) {
       size_t left =
           std::max(static_cast<ssize_t>(i + 1 - rhs.data.size()), ssize_t{0});
       size_t right = std::min(i + 1, lhs.data.size());
@@ -473,114 +486,27 @@ class BigInt {
         left++;
       }
 
-      res.data[i] = sum_low;
+      result.data[offset++] = sum_low;
       carry_low = sum_mid;
       carry_high = sum_high;
     }
 
     if (carry_high > 0) {
-      res.data.push_back(carry_low);
-      res.data.push_back(carry_high);
+      result.data[offset++] = carry_low;
+      result.data[offset++] = carry_high;
     } else if (carry_low > 0) {
-      res.data.push_back(carry_low);
+      result.data[offset++] = carry_low;
     }
-
-    return res;
   }
 
-  static BigInt mul_quadratic_simd(const BigInt &lhs, const BigInt &rhs) {
-    BigInt res;
-    res.data.increase_size_zerofill(lhs.data.size() + rhs.data.size());
-
-    const uint32_t *ldata = reinterpret_cast<const uint32_t *>(lhs.data.data());
-    const uint32_t *rdata = reinterpret_cast<const uint32_t *>(rhs.data.data());
-    uint32_t *data = reinterpret_cast<uint32_t *>(res.data.data());
-
-    int64_t carry = 0;
-    for (size_t i = 0; i < res.data.size() * 2; i++) {
-      size_t left = std::max(static_cast<ssize_t>(i + 1 - rhs.data.size() * 2),
-                             ssize_t{0});
-      size_t right = std::min(i + 1, lhs.data.size() * 2);
-
-      // sum_low is signed
-      __m256i sum_low = _mm256_set_epi64x(carry, 0, 0, 0);
-      __m256i sum_high = _mm256_setzero_si256();
-
-      while (left + 8 <= right) {
-#define X                                                                      \
-  do {                                                                         \
-    __m128i lhs32 =                                                            \
-        _mm_loadu_si128(reinterpret_cast<const __m128i *>(ldata + left));      \
-    __m128i rhs32 = _mm_loadu_si128(                                           \
-        reinterpret_cast<const __m128i *>(rdata + i - left - 3));              \
-    rhs32 = _mm_shuffle_epi32(rhs32, 0b00011011);                              \
-    __m256i lhs64 = _mm256_cvtepu32_epi64(lhs32);                              \
-    __m256i rhs64 = _mm256_cvtepu32_epi64(rhs32);                              \
-    __m256i product = _mm256_mul_epu32(lhs64, rhs64);                          \
-    __m256i sum_low_new = _mm256_add_epi64(sum_low, product);                  \
-    __m256i overflow = _mm256_cmpgt_epi64(sum_low, sum_low_new);               \
-    sum_low = sum_low_new;                                                     \
-    sum_high = _mm256_sub_epi64(sum_high, overflow);                           \
-    left += 4;                                                                 \
-  } while (0);
-        X X
-#undef X
-      }
-
-      // Convert sum_low to unsigned
-      __m256i negative = _mm256_cmpgt_epi64(_mm256_setzero_si256(), sum_low);
-      sum_high = _mm256_add_epi64(sum_high, negative);
-
-      // Horizontal sum
-      uint64_t sum_low_val = 0;
-      uint64_t sum_high_val = 0;
-
-#define X(i)                                                                   \
-  do {                                                                         \
-    uint64_t word = _mm256_extract_epi64(sum_low, i);                          \
-    asm("add %[word], %[sum_low_val];"                                         \
-        "adc $0, %[sum_high_val];"                                             \
-        : [sum_low_val] "+r"(sum_low_val), [sum_high_val] "+r"(sum_high_val)   \
-        : [word] "r"(word)                                                     \
-        : "flags");                                                            \
-    sum_high_val += _mm256_extract_epi64(sum_high, i);                         \
-  } while (0);
-      X(0)
-      X(1)
-      X(2)
-      X(3)
-#undef X
-
-      while (left < right) {
-        asm("add %[product], %[sum_low_val];"
-            "adc $0, %[sum_high_val];"
-            : [sum_low_val] "+r"(sum_low_val), [sum_high_val] "+r"(sum_high_val)
-            : [product] "r"(uint64_t{ldata[left]} * rdata[i - left])
-            : "flags");
-        left++;
-      }
-
-      data[i] = static_cast<uint32_t>(sum_low_val);
-      carry = (sum_high_val << 32) | (sum_low_val >> 32);
-    }
-
-    if (carry > 0) {
-      res.data.push_back(carry);
-    } else if (res.data.back() == 0) {
-      res.data.pop_back();
-    }
-
-    return res;
-  }
-
-  static BigInt mul_karatsuba(const BigInt &lhs, const BigInt &rhs) {
+  static void mul_karatsuba(BigInt& result, const BigInt &lhs, const BigInt &rhs, size_t offset) {
     size_t b = std::min(lhs.data.size(), rhs.data.size()) / 2;
 
     BigInt x0, x1, y0, y1;
-    x0.data = {lhs.data.data(), b};
-    x1.data = {lhs.data.data() + b, lhs.data.size() - b};
-    y0.data = {rhs.data.data(), b};
-    y1.data = {rhs.data.data() + b, rhs.data.size() - b};
+    x0.data.init(const_cast<uint64_t*>(lhs.data.data()), b);
+    x1.data.init(const_cast<uint64_t*>(lhs.data.data()) + b, lhs.data.size() - b);
+    y0.data.init(const_cast<uint64_t*>(rhs.data.data()), b);
+    y1.data.init(const_cast<uint64_t*>(rhs.data.data()) + b, rhs.data.size() - b);
     while (!x0.data.empty() && x0.data.back() == 0) {
       x0.data.pop_back();
     }
@@ -588,17 +514,103 @@ class BigInt {
       y0.data.pop_back();
     }
 
-    BigInt z0 = x0 * y0;
-    BigInt z2 = x1 * y1;
+    mul_at(result, x0, y0, offset);
+    size_t z0_len = 0;
+    if (!x0.data.empty() && !y0.data.empty()) {
+      z0_len = x0.data.size() + y0.data.size() - 1;
+      if (result.data[offset + z0_len] != 0) {
+        z0_len++;
+      }
+    }
+    BigInt z0;
+    z0.data.init(result.data.data() + offset, z0_len);
+
+    mul_at(result, x1, y1, offset + b * 2);
+    size_t z2_len = x1.data.size() + y1.data.size() - 1;
+    if (result.data[offset + b * 2 + z2_len] != 0) {
+      z2_len++;
+    }
+    BigInt z2;
+    z2.data.init(result.data.data() + offset + b * 2, z2_len);
+
     BigInt z1 = (x0 + x1) * (y0 + y1) - z0 - z2;
-    BigInt result;
-    result.data.increase_size(b * 2 + z2.data.size());
-    std::copy(z0.data.begin(), z0.data.end(), result.data.begin());
-    std::fill(result.data.begin() + z0.data.size(), result.data.begin() + b * 2,
-              0);
-    std::copy(z2.data.begin(), z2.data.end(), result.data.begin() + b * 2);
-    add_at(result, z1, b);
-    return result;
+    add_at_no_resize(result, z1, offset + b);
+
+    x0.data.forget();
+    x1.data.forget();
+    y0.data.forget();
+    y1.data.forget();
+    z0.data.forget();
+    z2.data.forget();
+  }
+
+  static void mul_disproportional(BigInt& result, const BigInt &lhs, const BigInt &rhs, size_t offset) {
+    assert(lhs.data.size() < rhs.data.size());
+
+    BigInt rhs_chunk;
+
+    rhs_chunk.data.init(const_cast<uint64_t*>(rhs.data.data()), lhs.data.size());
+    while (!rhs_chunk.data.empty() && rhs_chunk.data.back() == 0) {
+      rhs_chunk.data.pop_back();
+    }
+    mul_at(result, lhs, rhs_chunk, offset);
+
+    size_t i = lhs.data.size();
+    for (; i + lhs.data.size() < rhs.data.size(); i += lhs.data.size()) {
+      rhs_chunk.data.init(const_cast<uint64_t*>(rhs.data.data()) + i, lhs.data.size());
+      while (!rhs_chunk.data.empty() && rhs_chunk.data.back() == 0) {
+        rhs_chunk.data.pop_back();
+      }
+      add_at_no_resize(result, lhs * rhs_chunk, offset + i);
+    }
+
+    rhs_chunk.data.init(const_cast<uint64_t*>(rhs.data.data()) + i, rhs.data.size() - i);
+    add_at_no_resize(result, lhs * rhs_chunk, offset + i);
+
+    rhs_chunk.data.forget();
+  }
+
+  static void mul_at(BigInt& result, const BigInt &lhs, const BigInt &rhs, size_t offset) {
+    if (lhs.data.empty() || rhs.data.empty()) {
+      return;
+    }
+
+    size_t lhs_offset = 0;
+    // while (lhs.data[lhs_offset] == 0) {
+    //   lhs_offset++;
+    // }
+    size_t rhs_offset = 0;
+    // while (rhs.data[rhs_offset] == 0) {
+    //   rhs_offset++;
+    // }
+    offset += lhs_offset + rhs_offset;
+
+    BigInt new_lhs, new_rhs;
+    new_lhs.data.init(const_cast<uint64_t*>(lhs.data.data()) + lhs_offset, lhs.data.size() - lhs_offset);
+    new_rhs.data.init(const_cast<uint64_t*>(rhs.data.data()) + rhs_offset, rhs.data.size() - rhs_offset);
+
+    if (new_lhs.data.size() == 1 && new_rhs.data.size() == 1) {
+      mul_1x1(result, new_lhs, new_rhs, offset);
+    } else if (new_rhs.data.size() == 1) {
+      mul_nx1(result, new_lhs, new_rhs.data[0], offset);
+    } else if (new_lhs.data.size() == 1) {
+      mul_nx1(result, new_rhs, new_lhs.data[0], offset);
+    // } else if (std::min(l->data.size(), r->data.size()) >= 384) {
+    //   mul_toom3(*l, *r);
+    } else if (std::min(new_lhs.data.size(), new_rhs.data.size()) >= 32) {
+      if (new_lhs.data.size() * 2 < new_rhs.data.size()) {
+        mul_disproportional(result, new_lhs, new_rhs, offset);
+      } else if (new_rhs.data.size() * 2 < new_lhs.data.size()) {
+        mul_disproportional(result, new_rhs, new_lhs, offset);
+      } else {
+        mul_karatsuba(result, new_lhs, new_rhs, offset);
+      }
+    } else {
+      mul_quadratic(result, new_lhs, new_rhs, offset);
+    }
+
+    new_lhs.data.forget();
+    new_rhs.data.forget();
   }
 
 public:
@@ -671,9 +683,55 @@ public:
 
   BigInt &operator+=(const BigInt &rhs) {
     if (__builtin_expect(data.empty(), 0)) {
-      *this = rhs;
+      return *this = rhs;
+    } else if (__builtin_expect(rhs.data.empty(), 0)) {
+      return *this;
+    }
+
+    size_t i = 0;
+    uint64_t value = 0;
+    size_t loop_count = std::min(data.size(), rhs.data.size());
+    asm("clc;"
+        "1:"
+        "mov (%[rhs_data_ptr],%[i],8), %[value];"
+        "adc %[value], (%[data_ptr],%[i],8);"
+        "inc %[i];"
+        "dec %[loop_count];"
+        "jnz 1b;"
+        "mov $0, %[value];"
+        "adc $0, %[value];"
+        : [i] "+r"(i), [value] "+r"(value), [loop_count] "+r"(loop_count)
+        : [data_ptr] "r"(data.data()), [rhs_data_ptr] "r"(rhs.data.data())
+        : "flags", "memory");
+
+    if (data.size() < rhs.data.size()) {
+      data.increase_size(rhs.data.size());
+      if (value) {
+        while (i < rhs.data.size() &&
+               rhs.data[i] == static_cast<uint64_t>(-1)) {
+          data[i] = 0;
+          i++;
+        }
+        if (__builtin_expect(i == rhs.data.size(), 0)) {
+          data.push_back(1);
+        } else {
+          data[i] = rhs.data[i] + 1;
+          i++;
+        }
+      }
+      std::copy(rhs.data.begin() + i, rhs.data.end(), data.begin() + i);
     } else {
-      add_at(*this, rhs, 0);
+      if (value) {
+        for (; i < data.size(); i++) {
+          data[i]++;
+          if (data[i] != 0) {
+            break;
+          }
+        }
+        if (__builtin_expect(i == data.size(), 0)) {
+          data.push_back(1);
+        }
+      }
     }
     return *this;
   }
@@ -684,6 +742,10 @@ public:
     }
 
     assert(data.size() >= rhs.data.size());
+    //if (data.size() < rhs.data.size()) {
+    //    std::cerr << *this << std::endl;
+    //    std::cerr << rhs << std::endl;
+    //}
 
     size_t i = 0;
     uint64_t value = 0;
@@ -770,24 +832,13 @@ public:
     if (data.empty() || rhs.data.empty()) {
       return {};
     }
-    const BigInt *l = this;
-    const BigInt *r = &rhs;
-    if (l->data.size() < r->data.size()) {
-      std::swap(l, r);
+    BigInt result;
+    result.data.increase_size_zerofill(data.size() + rhs.data.size());
+    mul_at(result, *this, rhs, 0);
+    while (result.data.back() == 0) {
+      result.data.pop_back();
     }
-    if (l->data.size() == 1) {
-      return mul_1x1(*l, *r);
-    }
-    // if (std::min(l->data.size(), r->data.size()) >= 384) {
-    //   return mul_toom3(*l, *r);
-    // } else
-    if (std::min(l->data.size(), r->data.size()) >= 128) {
-      return mul_karatsuba(*l, *r);
-      // } else if (std::min(l->data.size(), r->data.size()) >= 8) {
-      //   return mul_quadratic_simd(*l, *r);
-    } else {
-      return mul_quadratic(*l, *r);
-    }
+    return result;
   }
 
   friend std::ostream &operator<<(std::ostream &out, const BigInt &rhs) {
@@ -801,6 +852,18 @@ public:
     return out << std::dec << std::setfill(' ');
   }
 };
+
+// class BigIntView {
+//   BigInt value;
+
+// public:
+//   operator BigInt&() {
+//     return value;
+//   }
+//   operator const BigInt&() const {
+//     return value;
+//   }
+// };
 
 } // namespace bigint
 
@@ -855,7 +918,7 @@ int main() {
 
   // std::cout << s.size() << std::endl;
 
-  Int a = {s.c_str(), bigint::with_base{16}};
+  Int a = {s.c_str(), bigint::with_base{10}};
 
   // int start = clock();
   // for(size_t i = 0; i < 1000000; i++) {
@@ -863,8 +926,16 @@ int main() {
   // }
   // std::cerr << (float)(clock() - start) / CLOCKS_PER_SEC << std::endl;
 
+  // std::cerr << std::endl;
   // std::cout << a << std::endl;
-  // std::cout << "0x" << s << std::endl;
+  // std::cout << s << std::endl;
+
+  int start = clock();
+  for(int i = 0; i < 100; i++) {
+    a * a;
+  }
+  std::cerr << (float)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  std::cerr << a.data.size() << std::endl;
 
   return 0;
 }
