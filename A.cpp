@@ -1,3 +1,4 @@
+#include <complex>
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -365,6 +366,23 @@ public:
   }
 };
 
+uint64_t reverse_bits(uint64_t number, int length) {
+  assert(number < (uint64_t{1} << length));
+  number <<= 64 - length;
+  number = ((number & 0x5555555555555555) << 1 ) | ((number & 0xaaaaaaaaaaaaaaaa) >> 1);
+  number = ((number & 0x3333333333333333) << 2 ) | ((number & 0xcccccccccccccccc) >> 2);
+  number = ((number & 0x0f0f0f0f0f0f0f0f) << 4 ) | ((number & 0xf0f0f0f0f0f0f0f0) >> 4);
+  number = ((number & 0x00ff00ff00ff00ff) << 8 ) | ((number & 0xff00ff00ff00ff00) >> 8);
+  number = ((number & 0x0000ffff0000ffff) << 16) | ((number & 0xffff0000ffff0000) >> 16);
+  number = ((number & 0x00000000ffffffff) << 32) | ((number & 0xffffffff00000000) >> 32);
+  return number;
+}
+
+struct Complex4 {
+  double real[4] = {};
+  double imag[4] = {};
+} __attribute__((aligned(32)));
+
 class BigInt {
   // Stores 32-bit numbers
   SmallVec data;
@@ -613,6 +631,171 @@ class BigInt {
     new_rhs.data.forget();
   }
 
+  static void fft(Complex4* data, int n_pow, bool inverse) {
+    size_t n = size_t{1} << n_pow;
+    assert (n >= 4);
+
+    size_t quarter_n = (size_t{1} << (n_pow - 2));
+
+    // n = 2
+    for (size_t i = 0; i < quarter_n; i++) {
+      __m256d mask = _mm256_set_pd(-0., 0., -0., 0.);
+
+      __m256d real = _mm256_load_pd(data[i].real);
+      _mm256_stream_pd(data[i].real, _mm256_hadd_pd(real, _mm256_xor_pd(real, mask)));
+
+      __m256d imag = _mm256_load_pd(data[i].imag);
+      _mm256_stream_pd(data[i].imag, _mm256_hadd_pd(imag, _mm256_xor_pd(imag, mask)));
+    }
+
+    // n = 4
+    __m256d mask_real, mask_imag;
+    if (inverse) {
+      mask_real = _mm256_set_pd(-0., -0., 0., 0.);
+      mask_imag = _mm256_set_pd(0., -0., -0., 0.);
+    } else {
+      mask_real = _mm256_set_pd(0., -0., -0., 0.);
+      mask_imag = _mm256_set_pd(-0., -0., 0., 0.);
+    }
+
+    for (size_t i = 0; i < quarter_n; i++) {
+      __m256d real_low = _mm256_broadcast_pd(reinterpret_cast<__m128d*>(data[i].real));
+      __m256d imag_low = _mm256_broadcast_pd(reinterpret_cast<__m128d*>(data[i].imag));
+
+      __m128d real_high128 = _mm_load_pd(data[i].real + 2);
+      __m128d imag_high128 = _mm_load_pd(data[i].imag + 2);
+
+      __m128d add_real128 = _mm_shuffle_pd(real_high128, imag_high128, 2);
+      __m256d add_real = _mm256_xor_pd(_mm256_set_m128(add_real128, add_real128), mask_real);
+
+      __m128d add_imag128 = _mm_shuffle_pd(imag_high128, real_high128, 2);
+      __m256d add_imag = _mm256_xor_pd(_mm256_set_m128(add_imag128, add_imag128), mask_imag);
+
+      _mm256_stream_pd(data[i].real, _mm256_add_pd(real_low, add_real));
+      _mm256_stream_pd(data[i].imag, _mm256_add_pd(imag_low, add_imag));
+    }
+
+    // n >= 8
+    for (int block_pow = 3; block_pow <= n_pow; block_pow++) {
+      size_t block_len = size_t{1} << block_pow;
+      size_t block_quarter_len = size_t{1} << (block_pow - 2);
+      size_t block_eigths_len = size_t{1} << (block_pow - 3);
+
+      auto twiddle_factor = std::polar(1., (inverse ? -1 : 1) * static_cast<double>(2 * M_PI) / block_len);
+      auto twiddle_factor2 = twiddle_factor * twiddle_factor;
+      auto twiddle_factor3 = twiddle_factor2 * twiddle_factor;
+      auto twiddle_factor4 = twiddle_factor2 * twiddle_factor2;
+
+      __m256d twiddle_factor4_real = _mm256_set1_pd(twiddle_factor4.real());
+      __m256d twiddle_factor4_imag = _mm256_set1_pd(twiddle_factor4.imag());
+
+      for (Complex4* block_start = data; block_start != data + quarter_n; block_start += block_quarter_len) {
+        __m256d twiddle_real = _mm256_set_pd(
+          twiddle_factor3.real(),
+          twiddle_factor2.real(),
+          twiddle_factor.real(),
+          1
+        );
+        __m256d twiddle_imag = _mm256_set_pd(
+          twiddle_factor3.imag(),
+          twiddle_factor2.imag(),
+          twiddle_factor.imag(),
+          0
+        );
+
+        for (size_t i = 0; i < block_eigths_len; i++) {
+          __m256d even_real = _mm256_load_pd(block_start[i].real);
+          __m256d even_imag = _mm256_load_pd(block_start[i].imag);
+          __m256d odd_real = _mm256_load_pd(block_start[block_eigths_len + i].real);
+          __m256d odd_imag = _mm256_load_pd(block_start[block_eigths_len + i].imag);
+
+          __m256d add_real = _mm256_fmsub_pd(odd_real, twiddle_real, _mm256_mul_pd(odd_imag, twiddle_imag));
+          __m256d add_imag = _mm256_fmadd_pd(odd_real, twiddle_imag, _mm256_mul_pd(odd_imag, twiddle_real));
+
+          _mm256_stream_pd(block_start[i].real, _mm256_add_pd(even_real, add_real));
+          _mm256_stream_pd(block_start[i].imag, _mm256_add_pd(even_imag, add_imag));
+          _mm256_stream_pd(block_start[block_eigths_len + i].real, _mm256_sub_pd(even_real, add_real));
+          _mm256_stream_pd(block_start[block_eigths_len + i].imag, _mm256_sub_pd(even_imag, add_imag));
+
+          __m256d twiddle_real_new = _mm256_fmsub_pd(twiddle_real, twiddle_factor4_real, _mm256_mul_pd(twiddle_imag, twiddle_factor4_imag));
+          __m256d twiddle_imag_new = _mm256_fmadd_pd(twiddle_real, twiddle_factor4_imag, _mm256_mul_pd(twiddle_imag, twiddle_factor4_real));
+          twiddle_real = twiddle_real_new;
+          twiddle_imag = twiddle_imag_new;
+        }
+      }
+    }
+  }
+
+  static BigInt mul_fft(const BigInt& lhs, const BigInt& rhs) {
+    int n_pow = 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 8 - 1);
+    size_t n = size_t{1} << n_pow;
+
+    // Split numbers into bytes
+    std::vector<Complex4> old_fft(size_t{1} << (n_pow - 2));
+
+    const uint8_t* lhs_data = reinterpret_cast<const uint8_t*>(lhs.data.data());
+    for (size_t i = 0; i < lhs.data.size() * 8; i++) {
+      size_t j = reverse_bits(i, n_pow);
+      old_fft[j / 4].real[j % 4] = lhs_data[i];
+    }
+    const uint8_t* rhs_data = reinterpret_cast<const uint8_t*>(rhs.data.data());
+    for (size_t i = 0; i < rhs.data.size() * 8; i++) {
+      size_t j = reverse_bits(i, n_pow);
+      old_fft[j / 4].imag[j % 4] = rhs_data[i];
+    }
+
+    fft(old_fft.data(), n_pow, false);
+
+    // Disentangle real and imaginary coefficients into lhs & rhs and perform multiplication
+    std::vector<Complex4> new_fft(size_t{1} << (n_pow - 2));
+    for (size_t i = 0; i < n; i++) {
+      size_t ni = i == 0 ? 0 : n - i;
+
+      double lhs_real = (old_fft[i / 4].real[i % 4] + old_fft[ni / 4].real[ni % 4]) / 2;
+      double rhs_real = (old_fft[i / 4].imag[i % 4] + old_fft[ni / 4].imag[ni % 4]) / 2;
+
+      double rhs_imag = -(old_fft[i / 4].real[i % 4] - old_fft[ni / 4].real[ni % 4]) / 2;
+      double lhs_imag = (old_fft[i / 4].imag[i % 4] - old_fft[ni / 4].imag[ni % 4]) / 2;
+
+      size_t j = reverse_bits(i, n_pow);
+      std::complex<double> a{lhs_real, lhs_imag};
+      std::complex<double> b{rhs_real, rhs_imag};
+      std::complex<double> c = a * b;
+      new_fft[j / 4].real[j % 4] = c.real();
+      new_fft[j / 4].imag[j % 4] = c.imag();
+    }
+    fft(new_fft.data(), n_pow, true);
+
+    BigInt result;
+    result.data.increase_size(size_t{1} << (n_pow - 3));
+
+    uint64_t carry = 0;
+    double max_error = 0;
+    uint8_t* data = reinterpret_cast<uint8_t*>(result.data.data());
+    for (size_t i = 0; i < n; i++) {
+      max_error = std::max(max_error, abs(new_fft[i / 4].imag[i % 4] / n));
+      double fp_value = new_fft[i / 4].real[i % 4] / n;
+      uint64_t value = static_cast<uint64_t>(fp_value + 0.5);
+      max_error = std::max(max_error, abs(fp_value - value));
+      carry += value;
+      data[i] = static_cast<uint8_t>(carry);
+      carry >>= 8;
+    }
+
+    // std::cerr << max_error << " " << n_pow << std::endl;
+    assert(max_error < 0.1);
+
+    if (carry > 0) {
+      result.data.push_back(carry);
+    } else {
+      while (result.data.back() == 0) {
+        result.data.pop_back();
+      }
+    }
+
+    return result;
+  }
+
 public:
   BigInt() {}
 
@@ -742,10 +925,6 @@ public:
     }
 
     assert(data.size() >= rhs.data.size());
-    //if (data.size() < rhs.data.size()) {
-    //    std::cerr << *this << std::endl;
-    //    std::cerr << rhs << std::endl;
-    //}
 
     size_t i = 0;
     uint64_t value = 0;
@@ -832,6 +1011,9 @@ public:
     if (data.empty() || rhs.data.empty()) {
       return {};
     }
+    if (std::min(data.size(), rhs.data.size()) >= 1000) {
+      return mul_fft(*this, rhs);
+    }
     BigInt result;
     result.data.increase_size_zerofill(data.size() + rhs.data.size());
     mul_at(result, *this, rhs, 0);
@@ -906,13 +1088,28 @@ int main() {
 
   using Int = bigint::BigInt;
 
+  // int n_pow = 24;
+  // std::vector<bigint::Complex4> data(1 << (n_pow - 2));
+  // for(bigint::Complex4& block: data) {
+  //   for(double& x : block.real) {
+  //     x = rand();
+  //   }
+  //   for(double& y : block.imag) {
+  //     y = rand();
+  //   }
+  // }
+
+  // int start = clock();
+  // Int::fft(data.data(), n_pow, false);
+  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+
   // Int a{};
 
   // Int a = 1;
   // a += 2;
 
   std::string s;
-  for (int i = 0; i < 1000000; i++) {
+  for (int i = 0; i < 2000000; i++) {
     s.push_back('0' + rand() % 10);
   }
 
@@ -924,18 +1121,18 @@ int main() {
   // for(size_t i = 0; i < 1000000; i++) {
   //   a + a;
   // }
-  // std::cerr << (float)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
 
   // std::cerr << std::endl;
   // std::cout << a << std::endl;
   // std::cout << s << std::endl;
 
-  int start = clock();
-  for(int i = 0; i < 100; i++) {
-    a * a;
-  }
-  std::cerr << (float)(clock() - start) / CLOCKS_PER_SEC << std::endl;
-  std::cerr << a.data.size() << std::endl;
+  // int start = clock();
+  // for(int i = 0; i < 100; i++) {
+  //   a * a;
+  // }
+  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  // std::cerr << a.data.size() << std::endl;
 
   return 0;
 }
