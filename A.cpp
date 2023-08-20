@@ -681,29 +681,28 @@ class BigInt {
       size_t block_quarter_len = size_t{1} << (block_pow - 2);
       size_t block_eigths_len = size_t{1} << (block_pow - 3);
 
-      auto twiddle_factor = std::polar(1., (inverse ? -1 : 1) * static_cast<double>(2 * M_PI) / block_len);
-      auto twiddle_factor2 = twiddle_factor * twiddle_factor;
-      auto twiddle_factor3 = twiddle_factor2 * twiddle_factor;
-      auto twiddle_factor4 = twiddle_factor2 * twiddle_factor2;
-
-      __m256d twiddle_factor4_real = _mm256_set1_pd(twiddle_factor4.real());
-      __m256d twiddle_factor4_imag = _mm256_set1_pd(twiddle_factor4.imag());
+      double angle = (inverse ? -1 : 1) * static_cast<double>(2 * M_PI) / block_len;
+      __m256d twiddle_real_low = _mm256_set_pd(
+        std::cos(angle * 3),
+        std::cos(angle * 2),
+        std::cos(angle),
+        1
+      );
+      __m256d twiddle_imag_low = _mm256_set_pd(
+        std::sin(angle * 3),
+        std::sin(angle * 2),
+        std::sin(angle),
+        0
+      );
 
       for (Complex4* block_start = data; block_start != data + quarter_n; block_start += block_quarter_len) {
-        __m256d twiddle_real = _mm256_set_pd(
-          twiddle_factor3.real(),
-          twiddle_factor2.real(),
-          twiddle_factor.real(),
-          1
-        );
-        __m256d twiddle_imag = _mm256_set_pd(
-          twiddle_factor3.imag(),
-          twiddle_factor2.imag(),
-          twiddle_factor.imag(),
-          0
-        );
-
         for (size_t i = 0; i < block_eigths_len; i++) {
+          __m256d twiddle0_real = _mm256_set1_pd(std::cos(angle * i * 4));
+          __m256d twiddle0_imag = _mm256_set1_pd(std::sin(angle * i * 4));
+
+          __m256d twiddle_real = _mm256_fmsub_pd(twiddle0_real, twiddle_real_low, _mm256_mul_pd(twiddle0_imag, twiddle_imag_low));
+          __m256d twiddle_imag = _mm256_fmadd_pd(twiddle0_real, twiddle_imag_low, _mm256_mul_pd(twiddle0_imag, twiddle_real_low));
+
           __m256d even_real = _mm256_load_pd(block_start[i].real);
           __m256d even_imag = _mm256_load_pd(block_start[i].imag);
           __m256d odd_real = _mm256_load_pd(block_start[block_eigths_len + i].real);
@@ -716,30 +715,29 @@ class BigInt {
           _mm256_stream_pd(block_start[i].imag, _mm256_add_pd(even_imag, add_imag));
           _mm256_stream_pd(block_start[block_eigths_len + i].real, _mm256_sub_pd(even_real, add_real));
           _mm256_stream_pd(block_start[block_eigths_len + i].imag, _mm256_sub_pd(even_imag, add_imag));
-
-          __m256d twiddle_real_new = _mm256_fmsub_pd(twiddle_real, twiddle_factor4_real, _mm256_mul_pd(twiddle_imag, twiddle_factor4_imag));
-          __m256d twiddle_imag_new = _mm256_fmadd_pd(twiddle_real, twiddle_factor4_imag, _mm256_mul_pd(twiddle_imag, twiddle_factor4_real));
-          twiddle_real = twiddle_real_new;
-          twiddle_imag = twiddle_imag_new;
         }
       }
     }
   }
 
+  static int get_fft_n_pow(const BigInt& lhs, const BigInt& rhs) {
+    return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 4 - 1);
+  }
+
   static BigInt mul_fft(const BigInt& lhs, const BigInt& rhs) {
-    int n_pow = 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 8 - 1);
+    int n_pow = get_fft_n_pow(lhs, rhs);
     size_t n = size_t{1} << n_pow;
 
     // Split numbers into bytes
     std::vector<Complex4> old_fft(size_t{1} << (n_pow - 2));
 
-    const uint8_t* lhs_data = reinterpret_cast<const uint8_t*>(lhs.data.data());
-    for (size_t i = 0; i < lhs.data.size() * 8; i++) {
+    const uint16_t* lhs_data = reinterpret_cast<const uint16_t*>(lhs.data.data());
+    for (size_t i = 0; i < lhs.data.size() * 4; i++) {
       size_t j = reverse_bits(i, n_pow);
       old_fft[j / 4].real[j % 4] = lhs_data[i];
     }
-    const uint8_t* rhs_data = reinterpret_cast<const uint8_t*>(rhs.data.data());
-    for (size_t i = 0; i < rhs.data.size() * 8; i++) {
+    const uint16_t* rhs_data = reinterpret_cast<const uint16_t*>(rhs.data.data());
+    for (size_t i = 0; i < rhs.data.size() * 4; i++) {
       size_t j = reverse_bits(i, n_pow);
       old_fft[j / 4].imag[j % 4] = rhs_data[i];
     }
@@ -767,23 +765,23 @@ class BigInt {
     fft(new_fft.data(), n_pow, true);
 
     BigInt result;
-    result.data.increase_size(size_t{1} << (n_pow - 3));
+    result.data.increase_size(size_t{1} << (n_pow - 2));
 
     uint64_t carry = 0;
     double max_error = 0;
-    uint8_t* data = reinterpret_cast<uint8_t*>(result.data.data());
+    uint16_t* data = reinterpret_cast<uint16_t*>(result.data.data());
     for (size_t i = 0; i < n; i++) {
       max_error = std::max(max_error, abs(new_fft[i / 4].imag[i % 4] / n));
       double fp_value = new_fft[i / 4].real[i % 4] / n;
       uint64_t value = static_cast<uint64_t>(fp_value + 0.5);
       max_error = std::max(max_error, abs(fp_value - value));
       carry += value;
-      data[i] = static_cast<uint8_t>(carry);
-      carry >>= 8;
+      data[i] = static_cast<uint16_t>(carry);
+      carry >>= 16;
     }
 
     // std::cerr << max_error << " " << n_pow << std::endl;
-    assert(max_error < 0.1);
+    assert(max_error < 0.4);
 
     if (carry > 0) {
       result.data.push_back(carry);
@@ -1011,7 +1009,8 @@ public:
     if (data.empty() || rhs.data.empty()) {
       return {};
     }
-    if (std::min(data.size(), rhs.data.size()) >= 1000) {
+    int n_pow = get_fft_n_pow(*this, rhs);
+    if (16 <= n_pow && n_pow <= 20) {
       return mul_fft(*this, rhs);
     }
     BigInt result;
