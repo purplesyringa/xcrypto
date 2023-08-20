@@ -1,3 +1,6 @@
+#include <gmpxx.h>
+#include <fftw3.h>
+#include <cstring>
 #include <complex>
 #include <algorithm>
 #include <array>
@@ -378,11 +381,6 @@ uint64_t reverse_bits(uint64_t number, int length) {
   return number;
 }
 
-struct Complex4 {
-  double real[4] = {};
-  double imag[4] = {};
-} __attribute__((aligned(32)));
-
 class BigInt {
   // Stores 32-bit numbers
   SmallVec data;
@@ -631,93 +629,10 @@ class BigInt {
     new_rhs.data.forget();
   }
 
-  static void fft(Complex4* data, int n_pow, bool inverse) {
-    size_t n = size_t{1} << n_pow;
-    assert (n >= 4);
-
-    size_t quarter_n = (size_t{1} << (n_pow - 2));
-
-    // n = 2
-    for (size_t i = 0; i < quarter_n; i++) {
-      __m256d mask = _mm256_set_pd(-0., 0., -0., 0.);
-
-      __m256d real = _mm256_load_pd(data[i].real);
-      _mm256_stream_pd(data[i].real, _mm256_hadd_pd(real, _mm256_xor_pd(real, mask)));
-
-      __m256d imag = _mm256_load_pd(data[i].imag);
-      _mm256_stream_pd(data[i].imag, _mm256_hadd_pd(imag, _mm256_xor_pd(imag, mask)));
-    }
-
-    // n = 4
-    __m256d mask_real, mask_imag;
-    if (inverse) {
-      mask_real = _mm256_set_pd(-0., -0., 0., 0.);
-      mask_imag = _mm256_set_pd(0., -0., -0., 0.);
-    } else {
-      mask_real = _mm256_set_pd(0., -0., -0., 0.);
-      mask_imag = _mm256_set_pd(-0., -0., 0., 0.);
-    }
-
-    for (size_t i = 0; i < quarter_n; i++) {
-      __m256d real_low = _mm256_broadcast_pd(reinterpret_cast<__m128d*>(data[i].real));
-      __m256d imag_low = _mm256_broadcast_pd(reinterpret_cast<__m128d*>(data[i].imag));
-
-      __m128d real_high128 = _mm_load_pd(data[i].real + 2);
-      __m128d imag_high128 = _mm_load_pd(data[i].imag + 2);
-
-      __m128d add_real128 = _mm_shuffle_pd(real_high128, imag_high128, 2);
-      __m256d add_real = _mm256_xor_pd(_mm256_set_m128(add_real128, add_real128), mask_real);
-
-      __m128d add_imag128 = _mm_shuffle_pd(imag_high128, real_high128, 2);
-      __m256d add_imag = _mm256_xor_pd(_mm256_set_m128(add_imag128, add_imag128), mask_imag);
-
-      _mm256_stream_pd(data[i].real, _mm256_add_pd(real_low, add_real));
-      _mm256_stream_pd(data[i].imag, _mm256_add_pd(imag_low, add_imag));
-    }
-
-    // n >= 8
-    for (int block_pow = 3; block_pow <= n_pow; block_pow++) {
-      size_t block_len = size_t{1} << block_pow;
-      size_t block_quarter_len = size_t{1} << (block_pow - 2);
-      size_t block_eigths_len = size_t{1} << (block_pow - 3);
-
-      double angle = (inverse ? -1 : 1) * static_cast<double>(2 * M_PI) / block_len;
-      __m256d twiddle_real_low = _mm256_set_pd(
-        std::cos(angle * 3),
-        std::cos(angle * 2),
-        std::cos(angle),
-        1
-      );
-      __m256d twiddle_imag_low = _mm256_set_pd(
-        std::sin(angle * 3),
-        std::sin(angle * 2),
-        std::sin(angle),
-        0
-      );
-
-      for (Complex4* block_start = data; block_start != data + quarter_n; block_start += block_quarter_len) {
-        for (size_t i = 0; i < block_eigths_len; i++) {
-          __m256d twiddle0_real = _mm256_set1_pd(std::cos(angle * i * 4));
-          __m256d twiddle0_imag = _mm256_set1_pd(std::sin(angle * i * 4));
-
-          __m256d twiddle_real = _mm256_fmsub_pd(twiddle0_real, twiddle_real_low, _mm256_mul_pd(twiddle0_imag, twiddle_imag_low));
-          __m256d twiddle_imag = _mm256_fmadd_pd(twiddle0_real, twiddle_imag_low, _mm256_mul_pd(twiddle0_imag, twiddle_real_low));
-
-          __m256d even_real = _mm256_load_pd(block_start[i].real);
-          __m256d even_imag = _mm256_load_pd(block_start[i].imag);
-          __m256d odd_real = _mm256_load_pd(block_start[block_eigths_len + i].real);
-          __m256d odd_imag = _mm256_load_pd(block_start[block_eigths_len + i].imag);
-
-          __m256d add_real = _mm256_fmsub_pd(odd_real, twiddle_real, _mm256_mul_pd(odd_imag, twiddle_imag));
-          __m256d add_imag = _mm256_fmadd_pd(odd_real, twiddle_imag, _mm256_mul_pd(odd_imag, twiddle_real));
-
-          _mm256_stream_pd(block_start[i].real, _mm256_add_pd(even_real, add_real));
-          _mm256_stream_pd(block_start[i].imag, _mm256_add_pd(even_imag, add_imag));
-          _mm256_stream_pd(block_start[block_eigths_len + i].real, _mm256_sub_pd(even_real, add_real));
-          _mm256_stream_pd(block_start[block_eigths_len + i].imag, _mm256_sub_pd(even_imag, add_imag));
-        }
-      }
-    }
+  static void fft(fftw_complex* data, int n_pow, bool inverse) {
+    fftw_plan p = fftw_plan_dft_1d(size_t{1} << n_pow, data, data, inverse ? FFTW_BACKWARD : FFTW_FORWARD, FFTW_ESTIMATE);
+    fftw_execute(p);
+    fftw_destroy_plan(p);
   }
 
   static int get_fft_n_pow(const BigInt& lhs, const BigInt& rhs) {
@@ -729,38 +644,32 @@ class BigInt {
     size_t n = size_t{1} << n_pow;
 
     // Split numbers into bytes
-    std::vector<Complex4> old_fft(size_t{1} << (n_pow - 2));
+    std::vector<fftw_complex> old_fft(n);
 
     const uint16_t* lhs_data = reinterpret_cast<const uint16_t*>(lhs.data.data());
     for (size_t i = 0; i < lhs.data.size() * 4; i++) {
-      size_t j = reverse_bits(i, n_pow);
-      old_fft[j / 4].real[j % 4] = lhs_data[i];
+      old_fft[i][0] = lhs_data[i];
     }
     const uint16_t* rhs_data = reinterpret_cast<const uint16_t*>(rhs.data.data());
     for (size_t i = 0; i < rhs.data.size() * 4; i++) {
-      size_t j = reverse_bits(i, n_pow);
-      old_fft[j / 4].imag[j % 4] = rhs_data[i];
+      old_fft[i][1] = rhs_data[i];
     }
 
     fft(old_fft.data(), n_pow, false);
 
     // Disentangle real and imaginary coefficients into lhs & rhs and perform multiplication
-    std::vector<Complex4> new_fft(size_t{1} << (n_pow - 2));
+    std::vector<fftw_complex> new_fft(n);
     for (size_t i = 0; i < n; i++) {
       size_t ni = i == 0 ? 0 : n - i;
 
-      double lhs_real = (old_fft[i / 4].real[i % 4] + old_fft[ni / 4].real[ni % 4]) / 2;
-      double rhs_real = (old_fft[i / 4].imag[i % 4] + old_fft[ni / 4].imag[ni % 4]) / 2;
+      double lhs_real = (old_fft[i][0] + old_fft[ni][0]) / 2;
+      double rhs_real = (old_fft[i][1] + old_fft[ni][1]) / 2;
 
-      double rhs_imag = -(old_fft[i / 4].real[i % 4] - old_fft[ni / 4].real[ni % 4]) / 2;
-      double lhs_imag = (old_fft[i / 4].imag[i % 4] - old_fft[ni / 4].imag[ni % 4]) / 2;
+      double rhs_imag = -(old_fft[i][0] - old_fft[ni][0]) / 2;
+      double lhs_imag = (old_fft[i][1] - old_fft[ni][1]) / 2;
 
-      size_t j = reverse_bits(i, n_pow);
-      std::complex<double> a{lhs_real, lhs_imag};
-      std::complex<double> b{rhs_real, rhs_imag};
-      std::complex<double> c = a * b;
-      new_fft[j / 4].real[j % 4] = c.real();
-      new_fft[j / 4].imag[j % 4] = c.imag();
+      new_fft[i][0] = lhs_real * rhs_real - lhs_imag * rhs_imag;
+      new_fft[i][1] = lhs_real * rhs_imag + lhs_imag * rhs_real;
     }
     fft(new_fft.data(), n_pow, true);
 
@@ -771,8 +680,8 @@ class BigInt {
     double max_error = 0;
     uint16_t* data = reinterpret_cast<uint16_t*>(result.data.data());
     for (size_t i = 0; i < n; i++) {
-      max_error = std::max(max_error, abs(new_fft[i / 4].imag[i % 4] / n));
-      double fp_value = new_fft[i / 4].real[i % 4] / n;
+      max_error = std::max(max_error, abs(new_fft[i][1] / n));
+      double fp_value = new_fft[i][0] / n;
       uint64_t value = static_cast<uint64_t>(fp_value + 0.5);
       max_error = std::max(max_error, abs(fp_value - value));
       carry += value;
@@ -1010,7 +919,7 @@ public:
       return {};
     }
     int n_pow = get_fft_n_pow(*this, rhs);
-    if (16 <= n_pow && n_pow <= 20) {
+    if (n_pow >= 12) {
       return mul_fft(*this, rhs);
     }
     BigInt result;
@@ -1074,7 +983,21 @@ bigint::BigInt parse_message(const std::string &s) {
 
 } // namespace base64
 
-int main() {
+int main(int argc, char** argv) {
+  // const size_t N = 1 << 24;
+  // fftw_complex* in = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+  // fftw_complex* out = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+  // for (size_t i = 0; i < N; i++) {
+  //   in[i][0] = rand();
+  //   in[i][1] = rand();
+  // }
+  // fftw_plan p = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+  // int start = clock();
+  // fftw_execute(p);
+  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  // fftw_destroy_plan(p);  
+  // return 0;
+
   // uint32_t p, g, k;
   // std::cin >> p >> g >> k;
 
@@ -1107,13 +1030,16 @@ int main() {
   // Int a = 1;
   // a += 2;
 
+  srand(atoi(argv[1]));
+
   std::string s;
-  for (int i = 0; i < 2000000; i++) {
+  for (int i = 0; i < 3000000; i++) {
     s.push_back('0' + rand() % 10);
   }
 
   // std::cout << s.size() << std::endl;
 
+  // mpz_class a(s);
   Int a = {s.c_str(), bigint::with_base{10}};
 
   // int start = clock();
