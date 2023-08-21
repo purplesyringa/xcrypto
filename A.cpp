@@ -1,4 +1,5 @@
 #include <gmpxx.h>
+#include <fftw3.h>
 #include <cstring>
 #include <complex>
 #include <algorithm>
@@ -628,131 +629,68 @@ class BigInt {
     new_rhs.data.forget();
   }
 
-  static constexpr uint64_t FFT_MOD = 0xffffffff00000001;
-  static constexpr uint64_t FFT_MINUS_MOD = 0xffffffff;
-  static constexpr uint64_t FFT_ROOT = 0x185629dcda58878c;
-  static constexpr uint64_t FFT_ROOT_INV = 0x76b6b635b6fc8719;
-  static constexpr uint64_t FFT_TWO_INV = 0x7fffffff80000001;
-  static constexpr uint64_t FFT_POW = 32;
-
-  static uint64_t fft_add(uint64_t a, uint64_t b) {
-    uint64_t tmp;
-    asm(
-      "add %[b], %[a];"
-      "lea (%[minus_mod],%[a]), %[tmp];"
-      "cmovc %[tmp], %[a];"
-      "cmp %[a], %[mod];"
-      "cmovbe %[tmp], %[a];"
-      : [a] "+a"(a), [tmp] "=&r"(tmp)
-      : [b] "r"(b), [mod] "r"(FFT_MOD), [minus_mod] "r"(FFT_MINUS_MOD)
-      : "flags"
-    );
-    return a;
-  }
-
-  static uint64_t fft_sub(uint64_t a, uint64_t b) {
-    uint64_t tmp;
-    asm(
-      "sub %[b], %[a];"
-      "lea (%[mod],%[a]), %[tmp];"
-      "cmovnc %[a], %[tmp];"
-      : [a] "+a"(a), [tmp] "=&r"(tmp)
-      : [b] "r"(b), [mod] "r"(FFT_MOD)
-      : "flags"
-    );
-    return tmp;
-  }
-
-  static uint64_t fft_mul(uint64_t a1, uint64_t b1) {
-    __uint128_t prod = __uint128_t{a1} * b1;
-    uint32_t a = prod >> 96;
-    uint32_t b = prod >> 64;
-    uint64_t c = prod;
-    if (__builtin_add_overflow(c, uint64_t{b} * 0xffffffff, &c) || c >= FFT_MOD) {
-      c -= FFT_MOD;
-    }
-    if (__builtin_sub_overflow(c, a, &c)) {
-      c += FFT_MOD;
-    }
-    return c;
-  }
-
-  static void fft(uint64_t* data, int n_pow, bool inverse) {
-    size_t n = size_t{1} << n_pow;
-
-    for (int block_pow = 1; block_pow <= n_pow; block_pow++) {
-      size_t block_len = size_t{1} << block_pow;
-      size_t block_half_len = size_t{1} << (block_pow - 1);
-
-      for (uint64_t* block_start = data; block_start != data + n; block_start += block_len) {
-        uint64_t twiddle_step = inverse ? FFT_ROOT_INV : FFT_ROOT;
-        for (int i = 0; i < FFT_POW - block_pow; i++) {
-          twiddle_step = fft_mul(twiddle_step, twiddle_step);
-        }
-
-        uint64_t twiddle = 1;
-        for (size_t i = 0; i < block_half_len; i++) {
-          uint64_t even = block_start[i];
-          uint64_t odd = block_start[block_half_len + i];
-          uint64_t odd_twiddled = fft_mul(odd, twiddle);
-          uint64_t a = fft_add(even, odd_twiddled);
-          uint64_t b = fft_sub(even, odd_twiddled);
-          block_start[i] = a;
-          block_start[block_half_len + i] = b;
-          twiddle = fft_mul(twiddle, twiddle_step);
-        }
-      }
-    }
+  static void fft(fftw_complex* data, int n_pow, bool inverse) {
+    fftw_plan p = fftw_plan_dft_1d(size_t{1} << n_pow, data, data, inverse ? FFTW_BACKWARD : FFTW_FORWARD, FFTW_ESTIMATE);
+    fftw_execute(p);
+    fftw_destroy_plan(p);
   }
 
   static int get_fft_n_pow(const BigInt& lhs, const BigInt& rhs) {
     return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 4 - 1);
   }
 
-  // __attribute__((noinline))
   static BigInt mul_fft(const BigInt& lhs, const BigInt& rhs) {
     int n_pow = get_fft_n_pow(lhs, rhs);
     size_t n = size_t{1} << n_pow;
 
-    // std::cerr << n_pow << std::endl;
-
     // Split numbers into bytes
-    std::vector<uint64_t> lhs_fft(n);
+    std::vector<fftw_complex> old_fft(n);
+
     const uint16_t* lhs_data = reinterpret_cast<const uint16_t*>(lhs.data.data());
     for (size_t i = 0; i < lhs.data.size() * 4; i++) {
-      lhs_fft[reverse_bits(i, n_pow)] = lhs_data[i];
+      old_fft[i][0] = lhs_data[i];
     }
-    fft(lhs_fft.data(), n_pow, false);
-
-    std::vector<uint64_t> rhs_fft(n);
     const uint16_t* rhs_data = reinterpret_cast<const uint16_t*>(rhs.data.data());
     for (size_t i = 0; i < rhs.data.size() * 4; i++) {
-      rhs_fft[reverse_bits(i, n_pow)] = rhs_data[i];
+      old_fft[i][1] = rhs_data[i];
     }
-    fft(rhs_fft.data(), n_pow, false);
 
-    // Perform multiplication
-    std::vector<uint64_t> new_fft(n);
+    fft(old_fft.data(), n_pow, false);
+
+    // Disentangle real and imaginary coefficients into lhs & rhs and perform multiplication
+    std::vector<fftw_complex> new_fft(n);
     for (size_t i = 0; i < n; i++) {
-      new_fft[reverse_bits(i, n_pow)] = fft_mul(lhs_fft[i], rhs_fft[i]);
+      size_t ni = i == 0 ? 0 : n - i;
+
+      double lhs_real = (old_fft[i][0] + old_fft[ni][0]) / 2;
+      double rhs_real = (old_fft[i][1] + old_fft[ni][1]) / 2;
+
+      double rhs_imag = -(old_fft[i][0] - old_fft[ni][0]) / 2;
+      double lhs_imag = (old_fft[i][1] - old_fft[ni][1]) / 2;
+
+      new_fft[i][0] = lhs_real * rhs_real - lhs_imag * rhs_imag;
+      new_fft[i][1] = lhs_real * rhs_imag + lhs_imag * rhs_real;
     }
     fft(new_fft.data(), n_pow, true);
 
     BigInt result;
     result.data.increase_size(size_t{1} << (n_pow - 2));
 
-    uint64_t n_inv = 1;
-    for (int i = 0; i < n_pow; i++) {
-      n_inv = fft_mul(n_inv, FFT_TWO_INV);
-    }
-
     uint64_t carry = 0;
+    double max_error = 0;
     uint16_t* data = reinterpret_cast<uint16_t*>(result.data.data());
     for (size_t i = 0; i < n; i++) {
-      carry += fft_mul(new_fft[i], n_inv);
+      max_error = std::max(max_error, abs(new_fft[i][1] / n));
+      double fp_value = new_fft[i][0] / n;
+      uint64_t value = static_cast<uint64_t>(fp_value + 0.5);
+      max_error = std::max(max_error, abs(fp_value - value));
+      carry += value;
       data[i] = static_cast<uint16_t>(carry);
       carry >>= 16;
     }
+
+    // std::cerr << max_error << " " << n_pow << std::endl;
+    assert(max_error < 0.4);
 
     if (carry > 0) {
       result.data.push_back(carry);
@@ -761,8 +699,6 @@ class BigInt {
         result.data.pop_back();
       }
     }
-
-    // std::cerr << lhs.data.size() + rhs.data.size() << " -> " << result.data.size() << std::endl;
 
     return result;
   }
@@ -1074,17 +1010,20 @@ int main(int argc, char** argv) {
 
   using Int = bigint::BigInt;
 
-  int n_pow = 24;
-  std::vector<uint64_t> data(1 << n_pow);
-  for(uint64_t& x: data) {
-    x = rand() ^ ((uint64_t)rand() << 16) ^ ((uint64_t)rand() << 32) ^ ((uint64_t)rand() << 48);
-  }
+  // int n_pow = 24;
+  // std::vector<bigint::Complex4> data(1 << (n_pow - 2));
+  // for(bigint::Complex4& block: data) {
+  //   for(double& x : block.real) {
+  //     x = rand();
+  //   }
+  //   for(double& y : block.imag) {
+  //     y = rand();
+  //   }
+  // }
 
-  int start = clock();
-  Int::fft(data.data(), n_pow, false);
-  std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
-
-  return 0;
+  // int start = clock();
+  // Int::fft(data.data(), n_pow, false);
+  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
 
   // Int a{};
 
