@@ -460,9 +460,6 @@ class BigInt {
       return;
     }
 
-    uint64_t *ldata = lhs.data.data() + lhs_offset;
-    size_t lsize = lhs.data.size() - lhs_offset;
-
     size_t offset = 0;
     uint64_t value1, value2;
     size_t unrolled_loop_count = rhs.data.size() / 4;
@@ -499,7 +496,7 @@ class BigInt {
         "4:"
         : [offset] "+r"(offset), [value1] "=&r"(value1), [value2] "=&r"(value2),
           [unrolled_loop_count] "+r"(unrolled_loop_count), [left_loop_count] "+r"(left_loop_count)
-       : [data_ptr] "r"(ldata), [rhs_data_ptr] "r"(rhs.data.data())
+       : [data_ptr] "r"(lhs.data.data() + lhs_offset), [rhs_data_ptr] "r"(rhs.data.data())
        : "flags", "memory");
   }
 
@@ -676,7 +673,7 @@ class BigInt {
       mul_nx1(result, new_rhs, new_lhs.data[0], offset);
     // } else if (std::min(l->data.size(), r->data.size()) >= 384) {
     //   mul_toom3(*l, *r);
-    } else if (std::min(new_lhs.data.size(), new_rhs.data.size()) >= 32) {
+    } else if (std::min(new_lhs.data.size(), new_rhs.data.size()) >= 40) {
       if (new_lhs.data.size() * 2 < new_rhs.data.size()) {
         mul_disproportional(result, new_lhs, new_rhs, offset);
       } else if (new_rhs.data.size() * 2 < new_lhs.data.size()) {
@@ -886,6 +883,30 @@ public:
         }
       }
     }
+    return *this;
+  }
+
+  BigInt &operator+=(uint64_t value) {
+    if (__builtin_expect(value == 0, 0)) {
+      return *this;
+    } else if (__builtin_expect(data.empty(), 0)) {
+      data.push_back(value);
+      return *this;
+    }
+
+    if (__builtin_add_overflow(data[0], value, &data[0])) {
+      size_t i;
+      for (i = 1; i < data.size(); i++) {
+        data[i]++;
+        if (data[i] != 0) {
+          break;
+        }
+      }
+      if (__builtin_expect(i == data.size(), 0)) {
+        data.push_back(1);
+      }
+    }
+
     return *this;
   }
 
