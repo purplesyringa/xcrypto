@@ -403,33 +403,35 @@ class BigInt {
   }
 
   template <typename Iterator, typename Map>
-  static BigInt str_to_int(Iterator begin, Iterator end, uint64_t base, Map map,
-                           const BigInt *powers_of_base, int max_block_len, uint64_t base_product) {
+  static void str_to_int(Iterator begin, Iterator end, uint64_t base, Map map,
+                           const BigInt *powers_of_base, int max_block_len, uint64_t base_product, BigInt& result) {
     if (end - begin <= max_block_len) {
-      return str_to_int_64(begin, end, base, map);
+      result += str_to_int_64(begin, end, base, map);
+      return;
     } else if (end - begin <= 2 * max_block_len) {
-      return str_to_int_128(begin, end, base, max_block_len, base_product, map);
+      result += str_to_int_128(begin, end, base, max_block_len, base_product, map);
+      return;
     } else if (end - begin <= 200 * max_block_len) {
       int first_block_len = (end - begin) % max_block_len;
       if (first_block_len == 0) {
         first_block_len = max_block_len;
       }
-      BigInt result = str_to_int_64(end - first_block_len, end, base, map);
+      BigInt tmp = str_to_int_64(end - first_block_len, end, base, map);
       for (end -= first_block_len; begin != end; end -= max_block_len) {
-        result *= base_product;
-        result += str_to_int_64(end - max_block_len, end, base, map);
+        tmp *= base_product;
+        tmp += str_to_int_64(end - max_block_len, end, base, map);
       }
-      return result;
+      result += tmp;
+      return;
     }
 
     int low_len_pow = 63 - __builtin_clzll(end - begin - 1);
     uint64_t low_len = uint64_t{1} << low_len_pow;
     Iterator mid = begin + low_len;
-    BigInt low =
-        str_to_int(begin, mid, base, map, powers_of_base, max_block_len, base_product);
-    BigInt high =
-        str_to_int(mid, end, base, map, powers_of_base, max_block_len, base_product);
-    return high * powers_of_base[low_len_pow] + low;
+    BigInt high;
+    str_to_int(mid, end, base, map, powers_of_base, max_block_len, base_product, high);
+    result += high * powers_of_base[low_len_pow];
+    str_to_int(begin, mid, base, map, powers_of_base, max_block_len, base_product, result);
   }
 
   template <typename Iterator, typename Map>
@@ -447,8 +449,10 @@ class BigInt {
       powers_of_base.push_back(powers_of_base.back() * powers_of_base.back());
     }
 
-    return str_to_int(begin, end, base, map, powers_of_base.data(),
-                      max_block_len, base_product);
+    BigInt result;
+    str_to_int(begin, end, base, map, powers_of_base.data(),
+                      max_block_len, base_product, result);
+    return result;
   }
 
   static void add_at_no_resize(BigInt &lhs, const BigInt &rhs, size_t offset) {
