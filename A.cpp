@@ -386,24 +386,49 @@ class BigInt {
   SmallVec data;
 
   template <typename Iterator, typename Map>
+  static uint64_t str_to_int_64(Iterator begin, Iterator end, uint64_t base, Map map) {
+    uint64_t val = 0;
+    for (auto it = end; it != begin;) {
+      val *= base;
+      val += map(*--it);
+    }
+    return val;
+  }
+
+  template <typename Iterator, typename Map>
+  static __uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base, int max_block_len, uint64_t base_product, Map map) {
+    uint64_t low = str_to_int_64(begin, begin + max_block_len, base, map);
+    uint64_t high = str_to_int_64(begin + max_block_len, end, base, map);
+    return (__uint128_t)high * base_product + low;
+  }
+
+  template <typename Iterator, typename Map>
   static BigInt str_to_int(Iterator begin, Iterator end, uint64_t base, Map map,
-                           const BigInt *powers_of_base, int max_block_len) {
+                           const BigInt *powers_of_base, int max_block_len, uint64_t base_product) {
     if (end - begin <= max_block_len) {
-      uint64_t val = 0;
-      for (auto it = end; it != begin;) {
-        val *= base;
-        val += map(*--it);
+      return str_to_int_64(begin, end, base, map);
+    } else if (end - begin <= 2 * max_block_len) {
+      return str_to_int_128(begin, end, base, max_block_len, base_product, map);
+    } else if (end - begin <= 200 * max_block_len) {
+      int first_block_len = (end - begin) % max_block_len;
+      if (first_block_len == 0) {
+        first_block_len = max_block_len;
       }
-      return val;
+      BigInt result = str_to_int_64(end - first_block_len, end, base, map);
+      for (end -= first_block_len; begin != end; end -= max_block_len) {
+        result *= base_product;
+        result += str_to_int_64(end - max_block_len, end, base, map);
+      }
+      return result;
     }
 
     int low_len_pow = 63 - __builtin_clzll(end - begin - 1);
     uint64_t low_len = uint64_t{1} << low_len_pow;
     Iterator mid = begin + low_len;
     BigInt low =
-        str_to_int(begin, mid, base, map, powers_of_base, max_block_len);
+        str_to_int(begin, mid, base, map, powers_of_base, max_block_len, base_product);
     BigInt high =
-        str_to_int(mid, end, base, map, powers_of_base, max_block_len);
+        str_to_int(mid, end, base, map, powers_of_base, max_block_len, base_product);
     return high * powers_of_base[low_len_pow] + low;
   }
 
@@ -423,7 +448,7 @@ class BigInt {
     }
 
     return str_to_int(begin, end, base, map, powers_of_base.data(),
-                      max_block_len);
+                      max_block_len, base_product);
   }
 
   static void add_at_no_resize(BigInt &lhs, const BigInt &rhs, size_t offset) {
@@ -1033,7 +1058,7 @@ int main(int argc, char** argv) {
   srand(atoi(argv[1]));
 
   std::string s;
-  for (int i = 0; i < 3000000; i++) {
+  for (int i = 0; i < 4000; i++) {
     s.push_back('0' + rand() % 10);
   }
 
@@ -1049,8 +1074,8 @@ int main(int argc, char** argv) {
   // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
 
   // std::cerr << std::endl;
-  // std::cout << a << std::endl;
-  // std::cout << s << std::endl;
+  std::cout << a << std::endl;
+  std::cout << s << std::endl;
 
   // int start = clock();
   // for(int i = 0; i < 100; i++) {
