@@ -537,17 +537,32 @@ class BigInt {
       uint64_t sum_low = carry_low;
       uint64_t sum_mid = carry_high;
       uint64_t sum_high = 0;
+
+#define LOOP do { \
+        uint64_t rax = lhs.data[left]; \
+        asm("mulq %[b];" \
+            "add %%rax, %[sum_low];" \
+            "adc %%rdx, %[sum_mid];" \
+            "adc $0, %[sum_high];" \
+            : "+a"(rax), [sum_low] "+r"(sum_low), [sum_mid] "+r"(sum_mid), \
+              [sum_high] "+r"(sum_high) \
+            : [b] "m"(rhs.data[i - left]) \
+            : "flags", "rdx"); \
+        left++; \
+      } while(0);
+
+      while (left + 8 <= right) {
+        LOOP
+        LOOP
+        LOOP
+        LOOP
+        LOOP
+        LOOP
+        LOOP
+        LOOP
+      }
       while (left < right) {
-        uint64_t rax = lhs.data[left];
-        asm("mulq %[b];"
-            "add %%rax, %[sum_low];"
-            "adc %%rdx, %[sum_mid];"
-            "adc $0, %[sum_high];"
-            : "+a"(rax), [sum_low] "+r"(sum_low), [sum_mid] "+r"(sum_mid),
-              [sum_high] "+r"(sum_high)
-            : [b] "m"(rhs.data[i - left])
-            : "flags", "rdx");
-        left++;
+        LOOP
       }
 
       result.data[offset++] = sum_low;
