@@ -896,23 +896,42 @@ public:
 
     assert(data.size() >= rhs.data.size());
 
-    size_t i = 0;
-    uint64_t value = 0;
-    size_t loop_count = rhs.data.size();
-    asm("clc;"
+    size_t offset = 0;
+    uint64_t value1, value2;
+    size_t unrolled_loop_count = rhs.data.size() / 4;
+    size_t left_loop_count = rhs.data.size() % 4;
+    if (left_loop_count == 0) {
+      unrolled_loop_count--;
+      left_loop_count = 4;
+    }
+    asm("test %[unrolled_loop_count], %[unrolled_loop_count];"
+        "jz 2f;"
         "1:"
-        "mov (%[rhs_data_ptr],%[i],8), %[value];"
-        "sbb %[value], (%[data_ptr],%[i],8);"
-        "inc %[i];"
-        "dec %[loop_count];"
+        "mov (%[rhs_data_ptr],%[offset]), %[value1];"
+        "mov 0x8(%[rhs_data_ptr],%[offset]), %[value2];"
+        "sbb %[value1], (%[data_ptr],%[offset]);"
+        "sbb %[value2], 0x8(%[data_ptr],%[offset]);"
+        "mov 0x10(%[rhs_data_ptr],%[offset]), %[value1];"
+        "mov 0x18(%[rhs_data_ptr],%[offset]), %[value2];"
+        "sbb %[value1], 0x10(%[data_ptr],%[offset]);"
+        "sbb %[value2], 0x18(%[data_ptr],%[offset]);"
+        "lea 0x20(%[offset]), %[offset];"
+        "dec %[unrolled_loop_count];"
         "jnz 1b;"
-        "jnc 2f;"
-        "3:"
-        "subq $1, (%[data_ptr],%[i],8);"
-        "inc %[i];"
-        "jc 3b;"
         "2:"
-        : [i] "+r"(i), [value] "+r"(value), [loop_count] "+r"(loop_count)
+        "mov (%[rhs_data_ptr],%[offset]), %[value1];"
+        "sbb %[value1], (%[data_ptr],%[offset]);"
+        "lea 0x8(%[offset]), %[offset];"
+        "dec %[left_loop_count];"
+        "jnz 2b;"
+        "jnc 3f;"
+        "4:"
+        "subq $1, (%[data_ptr],%[offset]);"
+        "lea 0x8(%[offset]), %[offset];"
+        "jc 4b;"
+        "3:"
+        : [offset] "+r"(offset), [value1] "=&r"(value1), [value2] "=&r"(value2),
+          [unrolled_loop_count] "+r"(unrolled_loop_count), [left_loop_count] "+r"(left_loop_count)
         : [data_ptr] "r"(data.data()), [rhs_data_ptr] "r"(rhs.data.data())
         : "flags", "memory");
 
