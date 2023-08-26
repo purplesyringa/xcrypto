@@ -455,33 +455,52 @@ class BigInt {
     return result;
   }
 
-  static void add_at_no_resize(BigInt &lhs, const BigInt &rhs, size_t offset) {
+  static void add_at_no_resize(BigInt &lhs, const BigInt &rhs, size_t lhs_offset) {
     if (__builtin_expect(rhs.data.empty(), 0)) {
       return;
     }
 
-    uint64_t *ldata = lhs.data.data() + offset;
-    size_t lsize = lhs.data.size() - offset;
+    uint64_t *ldata = lhs.data.data() + lhs_offset;
+    size_t lsize = lhs.data.size() - lhs_offset;
 
-    size_t i = 0;
-    uint64_t value = 0;
-    size_t loop_count = std::min(lsize, rhs.data.size());
-    asm("clc;"
+    size_t offset = 0;
+    uint64_t value1, value2;
+    size_t unrolled_loop_count = rhs.data.size() / 4;
+    size_t left_loop_count = rhs.data.size() % 4;
+    if (left_loop_count == 0) {
+      unrolled_loop_count--;
+      left_loop_count = 4;
+    }
+    asm("test %[unrolled_loop_count], %[unrolled_loop_count];"
+        "jz 2f;"
         "1:"
-        "mov (%[rhs_data_ptr],%[i],8), %[value];"
-        "adc %[value], (%[data_ptr],%[i],8);"
-        "inc %[i];"
-        "dec %[loop_count];"
+        "mov (%[rhs_data_ptr],%[offset]), %[value1];"
+        "mov 0x8(%[rhs_data_ptr],%[offset]), %[value2];"
+        "adc %[value1], (%[data_ptr],%[offset]);"
+        "adc %[value2], 0x8(%[data_ptr],%[offset]);"
+        "mov 0x10(%[rhs_data_ptr],%[offset]), %[value1];"
+        "mov 0x18(%[rhs_data_ptr],%[offset]), %[value2];"
+        "adc %[value1], 0x10(%[data_ptr],%[offset]);"
+        "adc %[value2], 0x18(%[data_ptr],%[offset]);"
+        "lea 0x20(%[offset]), %[offset];"
+        "dec %[unrolled_loop_count];"
         "jnz 1b;"
-        "jnc 2f;"
-        "3:"
-        "addq $1, (%[data_ptr],%[i],8);"
-        "inc %[i];"
-        "jc 3b;"
         "2:"
-        : [i] "+r"(i), [value] "+r"(value), [loop_count] "+r"(loop_count)
-        : [data_ptr] "r"(ldata), [rhs_data_ptr] "r"(rhs.data.data())
-        : "flags", "memory");
+        "mov (%[rhs_data_ptr],%[offset]), %[value1];"
+        "adc %[value1], (%[data_ptr],%[offset]);"
+        "lea 0x8(%[offset]), %[offset];"
+        "dec %[left_loop_count];"
+        "jnz 2b;"
+        "jnc 4f;"
+        "3:"
+        "addq $1, (%[data_ptr],%[offset]);"
+        "lea 0x8(%[offset]), %[offset];"
+        "jc 3b;"
+        "4:"
+        : [offset] "+r"(offset), [value1] "=&r"(value1), [value2] "=&r"(value2),
+          [unrolled_loop_count] "+r"(unrolled_loop_count), [left_loop_count] "+r"(left_loop_count)
+       : [data_ptr] "r"(ldata), [rhs_data_ptr] "r"(rhs.data.data())
+       : "flags", "memory");
   }
 
   static void mul_1x1(BigInt &result, const BigInt &lhs, const BigInt &rhs, size_t offset) {
