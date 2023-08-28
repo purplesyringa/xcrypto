@@ -1,19 +1,14 @@
-#include <gmpxx.h>
-#include <cstring>
-#include <complex>
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
+#include <cstring>
 #include <immintrin.h>
 #include <iomanip>
-#include <numeric>
 #include <iostream>
 #include <stdint.h>
 #include <string_view>
-#include <tuple>
 #include <vector>
-
-#define class struct
 
 // namespace libdivide {
 
@@ -267,15 +262,6 @@ public:
   }
 };
 
-uint64_t reverse_bits(uint64_t number, int length) {
-  number <<= (64 - length) & 63;
-  number = ((number & 0x5555555555555555) << 1 ) | ((number & 0xaaaaaaaaaaaaaaaa) >> 1);
-  number = ((number & 0x3333333333333333) << 2 ) | ((number & 0xcccccccccccccccc) >> 2);
-  number = ((number & 0x0f0f0f0f0f0f0f0f) << 4 ) | ((number & 0xf0f0f0f0f0f0f0f0) >> 4);
-  number = __builtin_bswap64(number);
-  return number;
-}
-
 class BigInt {
   SmallVec data;
 
@@ -293,7 +279,7 @@ class BigInt {
   static __uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base, int max_block_len, uint64_t base_product, Map map) {
     uint64_t low = str_to_int_64(begin, begin + max_block_len, base, map);
     uint64_t high = str_to_int_64(begin + max_block_len, end, base, map);
-    return (__uint128_t)high * base_product + low;
+    return static_cast<__uint128_t>(high) * base_product + low;
   }
 
   template <typename Iterator, typename Map>
@@ -319,8 +305,8 @@ class BigInt {
       return;
     }
 
-    int low_len_pow = 63 - __builtin_clzll(end - begin - 1);
-    uint64_t low_len = uint64_t{1} << low_len_pow;
+    int low_len_pow = 63 - __builtin_clzll(static_cast<uint64_t>(end - begin - 1));
+    ssize_t low_len = ssize_t{1} << low_len_pow;
     Iterator mid = begin + low_len;
     BigInt high;
     str_to_int(mid, end, base, map, powers_of_base, max_block_len, base_product, high);
@@ -339,7 +325,7 @@ class BigInt {
     }
 
     std::vector<BigInt> powers_of_base{base};
-    while ((uint64_t{1} << powers_of_base.size()) <= end - begin) {
+    while ((ssize_t{1} << powers_of_base.size()) <= end - begin) {
       powers_of_base.push_back(powers_of_base.back() * powers_of_base.back());
     }
 
@@ -422,7 +408,7 @@ class BigInt {
     uint64_t carry_high = 0;
     for (size_t i = 0; i < size; i++) {
       size_t left =
-          std::max(static_cast<ssize_t>(i + 1 - rhs.data.size()), ssize_t{0});
+          static_cast<size_t>(std::max(static_cast<ssize_t>(i + 1 - rhs.data.size()), ssize_t{0}));
       size_t right = std::min(i + 1, lhs.data.size());
 
       uint64_t sum_low = carry_low;
@@ -576,7 +562,7 @@ class BigInt {
       _mm_unpackhi_pd(reals, imags),
       _mm_unpacklo_pd(reals, imags)
     );
-  };
+  }
 
   static __m256d mul(__m256d a, __m256d b) {
     return _mm256_fmaddsub_pd(
@@ -763,15 +749,17 @@ class BigInt {
     static constexpr int COUNT2 = get_counts(N_POW).second;
     uint64_t result = 0;
     for (int i = 0; i < COUNT3; i++) {
-      result |= shiftl(number & (7 << (i * 3)), N_POW - (i * 2 + 1) * 3);
+      result |= shiftl(number & (uint64_t{7} << (i * 3)), N_POW - (i * 2 + 1) * 3);
     }
     for (int i = 0; i < COUNT2; i++) {
-      result |= shiftl(number & (3 << (COUNT3 * 3 + i * 2)), N_POW - COUNT3 * 3 * 2 - (i * 2 + 1) * 2);
+      result |= shiftl(number & (uint64_t{3} << (COUNT3 * 3 + i * 2)), N_POW - COUNT3 * 3 * 2 - (i * 2 + 1) * 2);
     }
     return result;
   }
+#ifndef __clang__
 #pragma GCC push_options
 #pragma GCC optimize("O2")
+#endif
   template<int N_POW, int... Iterator3, int... Iterator2>
   __attribute__((always_inline))
   static __m256i reverse_mixed_radix_const256_impl(
@@ -780,7 +768,6 @@ class BigInt {
     std::integer_sequence<int, Iterator2...>
   ) {
     static constexpr int COUNT3 = get_counts(N_POW).first;
-    static constexpr int COUNT2 = get_counts(N_POW).second;
     // Trick the compiler into believing the state of ymm{1..7} has to be preserved during the
     // function execution so that we are free to remove these registers from clobber list when
     // dynamically calling this function
@@ -801,7 +788,7 @@ class BigInt {
       result = _mm256_or_si256(
         result,
         shiftl(
-          _mm256_and_si256(number, _mm256_set1_epi64x(7 << (Iterator3 * 3))),
+          _mm256_and_si256(number, _mm256_set1_epi64x(uint64_t{7} << (Iterator3 * 3))),
           N_POW - (Iterator3 * 2 + 1) * 3
         )
       )
@@ -810,7 +797,7 @@ class BigInt {
       result = _mm256_or_si256(
         result,
         shiftl(
-          _mm256_and_si256(number, _mm256_set1_epi64x(3 << (COUNT3 * 3 + Iterator2 * 2))),
+          _mm256_and_si256(number, _mm256_set1_epi64x(uint64_t{3} << (COUNT3 * 3 + Iterator2 * 2))),
           N_POW - COUNT3 * 3 * 2 - (Iterator2 * 2 + 1) * 2
         )
       )
@@ -834,7 +821,9 @@ class BigInt {
       std::make_integer_sequence<int, COUNT2>()
     );
   }
+#ifndef __clang__
 #pragma GCC pop_options
+#endif
 
   template<int... Pows>
   static uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number, std::integer_sequence<int, Pows...>) {
@@ -860,7 +849,16 @@ class BigInt {
   }
   static std::array<uint64_t, 4> reverse_mixed_radix_dyn(int n_pow, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
     // This should be autovectorized
-    auto res = reverse_mixed_radix_dyn(n_pow, _mm256_set_epi64x(d, c, b, a), std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+    auto res = reverse_mixed_radix_dyn(
+      n_pow,
+      _mm256_set_epi64x(
+        static_cast<int64_t>(d),
+        static_cast<int64_t>(c),
+        static_cast<int64_t>(b),
+        static_cast<int64_t>(a)
+      ),
+      std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>()
+    );
     return {
       static_cast<uint64_t>(_mm256_extract_epi64(res, 0)),
       static_cast<uint64_t>(_mm256_extract_epi64(res, 1)),
@@ -887,9 +885,9 @@ class BigInt {
     while (cosines.size() < (size_t{2} << want_n_pow)) {
       size_t n = cosines.size();
       cosines.resize(2 * n);
-      double coeff = 2 * M_PI / n;
+      double coeff = 2 * M_PI / static_cast<double>(n);
       for (size_t k = 0; k < n / 2; k++) {
-        double c = cos(coeff * k);
+        double c = std::cos(coeff * static_cast<double>(k));
         cosines[n + k] = c;
         cosines[n + n / 2 + k] = -c;
       }
@@ -930,7 +928,7 @@ class BigInt {
 
     // Disentangle real and imaginary values into values of lhs & rhs at roots of unity, and then
     // compute FFT of the product as pointwise product of values of lhs and rhs at roots of unity
-    size_t united_fft_one = united_fft_access(1);
+    size_t united_fft_one = united_fft_access(uint64_t{1});
     auto get_long_fft_times4 = [&](
       size_t ai, size_t ai4, size_t ani0, size_t ani1, size_t ani04, size_t ani14
     ) {
@@ -1001,17 +999,17 @@ class BigInt {
       __m128d z1 = _mm_load_pd(short_fft[ani1]);
       __m256d z01 = _mm256_set_m128d(z1, z0);
 
-      __m256d fp_value = _mm256_mul_pd(z01, _mm256_set1_pd(2. / n));
+      __m256d fp_value = _mm256_mul_pd(z01, _mm256_set1_pd(2. / static_cast<double>(n)));
       __m256i value = double_to_uint64(fp_value);
       __m256d error = _mm256_andnot_pd(_mm256_set1_pd(-0.), _mm256_sub_pd(fp_value, uint64_to_double(value)));
       max_error_vec = _mm256_max_pd(max_error_vec, error);
       __uint128_t tmp = (
         carry
-        + value[0]
+        + static_cast<uint64_t>(value[0])
         + ((
-          value[1]
+          static_cast<uint64_t>(value[1])
           + ((
-            value[2]
+            static_cast<uint64_t>(value[2])
             + (static_cast<__uint128_t>(value[3]) << 16)
           ) << 16)
         ) << 16)
@@ -1076,11 +1074,11 @@ public:
   BigInt(std::string_view s, with_base base = {10}) {
     assert(base.base <= 36);
     *this = str_to_int(s.rbegin(), s.rend(), base.base, [base](char c) {
-      int digit;
+      uint64_t digit;
       if ('0' <= c && c <= '9') {
-        digit = c - '0';
+        digit = static_cast<uint64_t>(c - '0');
       } else if ('a' <= c && c <= 'z') {
-        digit = c - 'a' + 10;
+        digit = static_cast<uint64_t>(c - 'a' + 10);
       } else {
         assert(false);
       }
@@ -1170,30 +1168,6 @@ public:
         }
       }
     }
-    return *this;
-  }
-
-  BigInt &operator+=(uint64_t value) {
-    if (__builtin_expect(value == 0, 0)) {
-      return *this;
-    } else if (__builtin_expect(data.empty(), 0)) {
-      data.push_back(value);
-      return *this;
-    }
-
-    if (__builtin_add_overflow(data[0], value, &data[0])) {
-      size_t i;
-      for (i = 1; i < data.size(); i++) {
-        data[i]++;
-        if (data[i] != 0) {
-          break;
-        }
-      }
-      if (__builtin_expect(i == data.size(), 0)) {
-        data.push_back(1);
-      }
-    }
-
     return *this;
   }
 
@@ -1338,7 +1312,7 @@ public:
 int main(int argc, char** argv) {
   using Int = bigint::BigInt;
 
-  srand(atoi(argv[1]));
+  std::srand(static_cast<unsigned>(std::atoi(argv[1])));
 
   std::string s;
   for (int i = 0; i < 1200000; i++) {
@@ -1347,18 +1321,18 @@ int main(int argc, char** argv) {
 
   // mpz_class a(s);
   // mpz_class b = a;
-  // int start = clock();
+  // clock_t start = clock();
   Int a = {s.c_str(), bigint::with_base{10}};
 
   // std::cerr << a.data.size() << std::endl;
 
-  int start = clock();
+  clock_t start = clock();
   for (int i = 0; i < 100; i++) {
     // (mpz_class)(a * b);
     a * a;
     // ((a * a) * (a * a)) * ((a * a) * (a * a));
   }
-  std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  std::cerr << static_cast<double>(clock() - start) / CLOCKS_PER_SEC << std::endl;
 
   // std::cerr << std::endl;
   // std::cout << a << std::endl;
