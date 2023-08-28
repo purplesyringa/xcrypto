@@ -706,35 +706,6 @@ class BigInt {
     new_rhs.data.forget();
   }
 
-  static void fft(fftw_complex* data, int n_pow) {
-    // size_t n = size_t{1} << n_pow;
-    // for (size_t i = 0; i < n; i++) {
-    //   size_t ni = reverse_bits(i, n_pow);
-    //   if (i < ni) {
-    //     std::swap(data[i], data[ni]);
-    //   }
-    // }
-
-    // for (size_t len = 2; len <= n; len *= 2) {
-    //   double angle = -2 * M_PI / len;
-    //   for (size_t i = 0; i < n; i += len) {
-    //     for (size_t j = 0; j < len / 2; j++) {
-    //       fftw_complex w{std::cos(angle * j), std::sin(angle * j)};
-    //       fftw_complex u{data[i + j][0], data[i + j][1]};
-    //       fftw_complex v{data[i + j + len / 2][0], data[i + j + len / 2][1]};
-    //       data[i + j][0] = u[0] + v[0] * w[0] - v[1] * w[1];
-    //       data[i + j][1] = u[1] + v[0] * w[1] + v[1] * w[0];
-    //       data[i + j + len / 2][0] = u[0] - v[0] * w[0] + v[1] * w[1];
-    //       data[i + j + len / 2][1] = u[1] - v[0] * w[1] - v[1] * w[0];
-    //     }
-    //   }
-    // }
-
-    fftw_plan p = fftw_plan_dft_1d(size_t{1} << n_pow, data, data, FFTW_FORWARD, FFTW_ESTIMATE);
-    fftw_execute(p);
-    fftw_destroy_plan(p);
-  }
-
   // j = -i
   static __m256d mul_by_j(__m256d vec) {
     return _mm256_xor_pd(_mm256_permute_pd(vec, 5), _mm256_set_pd(-0., 0., -0., 0.));
@@ -907,58 +878,78 @@ class BigInt {
   }
 
   template<int N_POW>
-  static uint64_t reverse_mixed_radix_const(uint64_t number) {
+  static uint64_t reverse_mixed_radix_const64(uint64_t number) {
     auto [count3, count2] = get_counts(N_POW);
     return reverse_mixed_radix(number, count3, count2, N_POW);
+  }
+  // With a sufficient optimization level, vectorized functions don't use any GPRs. Enforcing this
+  // guarantee as a caller convention helps prevent the caller from spilling registers
+  template<int N_POW>
+  __attribute__((preserve_most))
+  static __m128i reverse_mixed_radix_const128(__m128i vec) {
+    // This should be autovectorized
+    return _mm_set_epi64x(
+      reverse_mixed_radix_const64<N_POW>(_mm_extract_epi64(vec, 1)),
+      reverse_mixed_radix_const64<N_POW>(_mm_extract_epi64(vec, 0))
+    );
+  }
+  template<int N_POW>
+  __attribute__((preserve_most))
+  static __m256i reverse_mixed_radix_const256(__m256i vec) {
+    // This should be autovectorized
+    return _mm256_set_epi64x(
+      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 3)),
+      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 2)),
+      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 1)),
+      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 0))
+    );
   }
 
   template<int... Pows>
   static uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number, std::integer_sequence<int, Pows...>) {
-    uint64_t (*dispatch[])(uint64_t) = {&reverse_mixed_radix_const<FFT_MIN + Pows>...};
+    uint64_t (*dispatch[])(uint64_t) = {&reverse_mixed_radix_const64<FFT_MIN + Pows>...};
     return dispatch[n_pow - FFT_MIN](number);
+  }
+  template<int... Pows>
+  static __m128i reverse_mixed_radix_dyn(int n_pow, __m128i vec, std::integer_sequence<int, Pows...>) {
+    __m128i (*dispatch[])(__m128i) __attribute__((preserve_most)) = {&reverse_mixed_radix_const128<FFT_MIN + Pows>...};
+    return dispatch[n_pow - FFT_MIN](vec);
+  }
+  template<int... Pows>
+  static __m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec, std::integer_sequence<int, Pows...>) {
+    __m256i (*dispatch[])(__m256i) __attribute__((preserve_most)) = {&reverse_mixed_radix_const256<FFT_MIN + Pows>...};
+    return dispatch[n_pow - FFT_MIN](vec);
   }
 
   static uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number) {
     return reverse_mixed_radix_dyn(n_pow, number, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
   }
+  static std::array<uint64_t, 2> reverse_mixed_radix_dyn(int n_pow, uint64_t a, uint64_t b) {
+    // This should be autovectorized
+    auto res = reverse_mixed_radix_dyn(n_pow, _mm_set_epi64x(b, a), std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+    return {
+      static_cast<uint64_t>(_mm_extract_epi64(res, 0)),
+      static_cast<uint64_t>(_mm_extract_epi64(res, 1))
+    };
+  }
+  static std::array<uint64_t, 4> reverse_mixed_radix_dyn(int n_pow, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    // This should be autovectorized
+    auto res = reverse_mixed_radix_dyn(n_pow, _mm256_set_epi64x(d, c, b, a), std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+    return {
+      static_cast<uint64_t>(_mm256_extract_epi64(res, 0)),
+      static_cast<uint64_t>(_mm256_extract_epi64(res, 1)),
+      static_cast<uint64_t>(_mm256_extract_epi64(res, 2)),
+      static_cast<uint64_t>(_mm256_extract_epi64(res, 3))
+    };
+  }
 
   static auto fft_cooley_tukey(fftw_complex* data, int n_pow) {
     ensure_twiddle_factors(n_pow);
-
-    // fft(data, n_pow);
-    // return [](size_t i) {
-    //   return i;
-    // };
-
     int count3 = get_counts(n_pow).first;
     fft_cooley_tukey_no_transpose_8(data, n_pow, count3);
-    return [n_pow](size_t i) {
-      return reverse_mixed_radix_dyn(n_pow, i);
+    return [n_pow](auto... args) {
+      return reverse_mixed_radix_dyn(n_pow, args...);
     };
-
-    // int count3 = n_pow >= CT8_CUTOFF ? (n_pow - CT8_CUTOFF + 2) / 3 : 0;
-    // int count2 = (n_pow - 3 * count3 - CT4_CUTOFF + 1) / 2;
-    // return [count3, count2, n_pow](size_t i) {
-    //   return reverse_mixed_radix(i, count3, count2, n_pow);
-    // };
-
-    // if (depth > 0) {
-    //   size_t n = size_t{1} << n_pow;
-    //   fftw_complex* transposed = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * n);
-    //   size_t from = 0;
-    //   for (size_t i = 0; i < n / 8; i++) {
-    //     size_t from1 = reverse_octal_digits((i + 1) * 8, n_pow, depth);
-    //     for (size_t j = 0; j < 8; j++) {
-    //       __builtin_prefetch(data[from1 + (j << (n_pow - 3))]);
-    //     }
-    //     for (size_t j = 0; j < 8; j++) {
-    //       _mm_stream_pd(transposed[i * 8 + j], _mm_load_pd(data[from + (j << (n_pow - 3))]));
-    //     }
-    //     from = from1;
-    //   }
-    //   std::memcpy(data, transposed, n * sizeof(fftw_complex));
-    //   free(transposed);
-    // }
   }
 
   static int get_fft_n_pow(const BigInt& lhs, const BigInt& rhs) {
@@ -977,6 +968,17 @@ class BigInt {
         cosines[n + n / 2 + k] = -c;
       }
     }
+  }
+
+  // Credits to https://stackoverflow.com/a/41148578
+  // Only work for inputs in the range: [0, 2^52)
+  static __m256i double_to_uint64(__m256d x) {
+    x = _mm256_add_pd(x, _mm256_set1_pd(0x0010000000000000));
+    return _mm256_xor_pd(x, _mm256_set1_pd(0x0010000000000000));
+  }
+  static __m256d uint64_to_double(__m256i x) {
+    x = _mm256_or_pd(x, _mm256_set1_pd(0x0010000000000000));
+    return _mm256_sub_pd(x, _mm256_set1_pd(0x0010000000000000));
   }
 
   static BigInt mul_fft(const BigInt& lhs, const BigInt& rhs) {
@@ -1001,32 +1003,46 @@ class BigInt {
 
     // Disentangle real and imaginary values into values of lhs & rhs at roots of unity, and then
     // compute FFT of the product as pointwise product of values of lhs and rhs at roots of unity
-    auto get_long_fft = [&](size_t i) {
-      size_t ni = i == 0 ? 0 : n - i;
-      __builtin_prefetch(united_fft[united_fft_access(i + 8)]);
-      __builtin_prefetch(united_fft[united_fft_access(ni - 8)]);
-      auto z = united_fft[united_fft_access(i)];
-      auto nz = united_fft[united_fft_access(ni)];
-      double lhs_real = (z[0] + nz[0]) / 2;
-      double lhs_imag = (z[1] - nz[1]) / 2;
-      double rhs_real = (z[1] + nz[1]) / 2;
-      double rhs_imag = -(z[0] - nz[0]) / 2;
-      return std::make_pair(
-        lhs_real * rhs_real - lhs_imag * rhs_imag,
-        lhs_real * rhs_imag + lhs_imag * rhs_real
-      );
+    size_t united_fft_one = united_fft_access(1);
+    auto get_long_fft_times4 = [&](size_t i) {
+      size_t ni0 = i == 0 ? 0 : n - i;
+      size_t ni1 = n - i - 1;
+      auto [ai, ai4] = united_fft_access(i, i + 4);
+      auto [ani0, ani1, ani04, ani14] = united_fft_access(ni0, ni1, ni0 - 4, ni1 - 4);
+      __builtin_prefetch(united_fft[ai4]);
+      __builtin_prefetch(united_fft[ai4 | united_fft_one]);
+      __builtin_prefetch(united_fft[ani04]);
+      __builtin_prefetch(united_fft[ani14]);
+      __m128d z0 = _mm_load_pd(united_fft[ai]);
+      __m128d z1 = _mm_load_pd(united_fft[ai | united_fft_one]);
+      __m256d z01 = _mm256_set_m128d(z1, z0);
+      __m128d nz0 = _mm_load_pd(united_fft[ani0]);
+      __m128d nz1 = _mm_load_pd(united_fft[ani1]);
+      __m256d nz01 = _mm256_set_m128d(nz1, nz0);
+      __m256d a = _mm256_add_pd(z01, nz01);
+      __m256d b = _mm256_sub_pd(z01, nz01);
+      __m256d c = _mm256_blend_pd(a, b, 10);
+      __m256d d = _mm256_permute_pd(a, 15);
+      __m256d g = _mm256_mul_pd(_mm256_permute_pd(c, 5), _mm256_movedup_pd(b));
+      return _mm256_fmsubadd_pd(c, d, g);
     };
 
     // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i q(x)) by using the
     // fact that p(x) and q(x) have real coefficients, so that we only perform half the work
     fftw_complex* short_fft = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * (n / 2));
-    for (size_t i = 0; i < n / 2; i++) {
-      double w_real = cosines[n + n / 4 + i];
-      double w_imag = cosines[n + i];
-      auto [real1, imag1] = get_long_fft(i);
-      auto [real2, imag2] = get_long_fft(n / 2 + i);
-      short_fft[i][0] = (real1 + real2 + w_real * (real1 - real2) - w_imag * (imag1 - imag2)) / 2;
-      short_fft[i][1] = (imag1 + imag2 + w_real * (imag1 - imag2) + w_imag * (real1 - real2)) / 2;
+    for (size_t i = 0; i < n / 2; i += 2) {
+      __m256d a = get_long_fft_times4(i);
+      __m256d b = get_long_fft_times4(n / 2 + i);
+      __m128d w_real01 = _mm_load_pd(&cosines[n + n / 4 + i]);
+      __m256d w_real0011 = _mm256_permute4x64_pd(_mm256_castpd128_pd256(w_real01), 0x50);
+      __m128d w_imag01 = _mm_load_pd(&cosines[n + i]);
+      __m256d w_imag0011 = _mm256_permute4x64_pd(_mm256_castpd128_pd256(w_imag01), 0x50);
+      __m256d c = _mm256_add_pd(a, b);
+      __m256d d = _mm256_sub_pd(a, b);
+      __m256d e = _mm256_permute_pd(d, 5);
+      __m256d f = _mm256_fmaddsub_pd(w_real0011, d, _mm256_fmaddsub_pd(w_imag0011, e, c));
+      __m256d g = _mm256_mul_pd(f, _mm256_set1_pd(0.125));
+      _mm256_store_pd(short_fft[i], g);
     }
 
     free(united_fft);
@@ -1037,23 +1053,49 @@ class BigInt {
     result.data.increase_size(size_t{1} << (n_pow - 2));
 
     uint64_t carry = 0;
-    double max_error = 0;
-    uint16_t* data = reinterpret_cast<uint16_t*>(result.data.data());
-    for (size_t i = 0; i < n / 2; i++) {
-      size_t ni = i == 0 ? 0 : n / 2 - i;
-      __builtin_prefetch(short_fft[short_fft_access(ni - 8)]);
-      auto z = short_fft[short_fft_access(ni)];
-      for (size_t j = 0; j < 2; j++) {
-        double fp_value = z[j] / (n / 2);
-        uint64_t value = static_cast<uint64_t>(fp_value + 0.5);
-        max_error = std::max(max_error, abs(fp_value - value));
-        carry += value;
-        *data++ = static_cast<uint16_t>(carry);
-        carry >>= 16;
-      }
+    __m256d max_error_vec = _mm256_setzero_pd();
+
+    for (size_t i = 0; i < n / 2; i += 2) {
+      size_t ni0 = i == 0 ? 0 : n / 2 - i;
+      size_t ni1 = n / 2 - i - 1;
+      auto [ani0, ani1, ani08, ani18] = short_fft_access(ni0, ni1, ni0 - 8, ni1 - 8);
+
+      __builtin_prefetch(short_fft[ani08]);
+      __builtin_prefetch(short_fft[ani18]);
+
+      __m128d z0 = _mm_load_pd(short_fft[ani0]);
+      __m128d z1 = _mm_load_pd(short_fft[ani1]);
+      __m256d z01 = _mm256_set_m128d(z1, z0);
+
+      __m256d fp_value = _mm256_mul_pd(z01, _mm256_set1_pd(2. / n));
+      __m256i value = double_to_uint64(fp_value);
+      __m256d error = _mm256_andnot_pd(_mm256_set1_pd(-0.), _mm256_sub_pd(fp_value, uint64_to_double(value)));
+      max_error_vec = _mm256_max_pd(max_error_vec, error);
+      __uint128_t tmp = (
+        carry
+        + value[0]
+        + ((
+          value[1]
+          + ((
+            value[2]
+            + (static_cast<__uint128_t>(value[3]) << 16)
+          ) << 16)
+        ) << 16)
+      );
+      result.data[i / 2] = static_cast<uint64_t>(tmp);
+      carry = tmp >> 64;
     }
 
     free(short_fft);
+
+    __m128d max_error_vec128 = _mm_max_pd(
+      _mm256_castpd256_pd128(max_error_vec),
+      _mm256_extractf128_pd(max_error_vec, 1)
+    );
+    double max_error = std::max(
+      _mm_cvtsd_f64(max_error_vec128),
+      _mm_cvtsd_f64(_mm_castsi128_pd(_mm_srli_si128(_mm_castpd_si128(max_error_vec128), 8)))
+    );
 
     // if (max_error >= 0.05) {
     //   std::cerr << max_error << " " << n_pow << std::endl;
