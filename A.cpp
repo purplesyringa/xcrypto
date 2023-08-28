@@ -721,9 +721,11 @@ class BigInt {
   };
 
   static __m256d mul(__m256d a, __m256d b) {
-    __m256d prod1 = _mm256_xor_pd(_mm256_mul_pd(a, b), _mm256_set_pd(-0., 0., -0., 0.));
-    __m256d prod2 = _mm256_mul_pd(a, _mm256_permute_pd(b, 5));
-    return _mm256_hadd_pd(prod1, prod2);
+    return _mm256_fmaddsub_pd(
+      _mm256_movedup_pd(a),
+      b,
+      _mm256_mul_pd(_mm256_permute_pd(a, 15), _mm256_permute_pd(b, 5))
+    );
   }
 
   static constexpr int FFT_CUTOFF = 14;
