@@ -7,6 +7,7 @@
 #include <cassert>
 #include <immintrin.h>
 #include <iomanip>
+#include <numeric>
 #include <iostream>
 #include <stdint.h>
 #include <string_view>
@@ -370,15 +371,31 @@ public:
 };
 
 uint64_t reverse_bits(uint64_t number, int length) {
-  assert(number < (uint64_t{1} << length));
-  number <<= 64 - length;
+  number <<= (64 - length) & 63;
   number = ((number & 0x5555555555555555) << 1 ) | ((number & 0xaaaaaaaaaaaaaaaa) >> 1);
   number = ((number & 0x3333333333333333) << 2 ) | ((number & 0xcccccccccccccccc) >> 2);
   number = ((number & 0x0f0f0f0f0f0f0f0f) << 4 ) | ((number & 0xf0f0f0f0f0f0f0f0) >> 4);
-  number = ((number & 0x00ff00ff00ff00ff) << 8 ) | ((number & 0xff00ff00ff00ff00) >> 8);
-  number = ((number & 0x0000ffff0000ffff) << 16) | ((number & 0xffff0000ffff0000) >> 16);
-  number = ((number & 0x00000000ffffffff) << 32) | ((number & 0xffffffff00000000) >> 32);
+  number = __builtin_bswap64(number);
   return number;
+}
+
+uint64_t reverse_mixed_radix(uint64_t number, int count3, int count2, int n_pow) {
+  auto shiftl = [](int x, int shift) {
+    if (shift > 0) {
+      return x << shift;
+    } else {
+      return x >> (-shift);
+    }
+  };
+
+  uint64_t result = 0;
+  for (int i = 0; i < count3; i++) {
+    result |= shiftl(number & (7 << (i * 3)), n_pow - (i * 2 + 1) * 3);
+  }
+  for (int i = 0; i < count2; i++) {
+    result |= shiftl(number & (3 << (count3 * 3 + i * 2)), n_pow - count3 * 3 * 2 - (i * 2 + 1) * 2);
+  }
+  return result;
 }
 
 class BigInt {
@@ -689,49 +706,332 @@ class BigInt {
     new_rhs.data.forget();
   }
 
-  static void fft(fftw_complex* data, int n_pow, bool inverse) {
-    fftw_plan p = fftw_plan_dft_1d(size_t{1} << n_pow, data, data, inverse ? FFTW_BACKWARD : FFTW_FORWARD, FFTW_ESTIMATE);
+  static void fft(fftw_complex* data, int n_pow) {
+    // size_t n = size_t{1} << n_pow;
+    // for (size_t i = 0; i < n; i++) {
+    //   size_t ni = reverse_bits(i, n_pow);
+    //   if (i < ni) {
+    //     std::swap(data[i], data[ni]);
+    //   }
+    // }
+
+    // for (size_t len = 2; len <= n; len *= 2) {
+    //   double angle = -2 * M_PI / len;
+    //   for (size_t i = 0; i < n; i += len) {
+    //     for (size_t j = 0; j < len / 2; j++) {
+    //       fftw_complex w{std::cos(angle * j), std::sin(angle * j)};
+    //       fftw_complex u{data[i + j][0], data[i + j][1]};
+    //       fftw_complex v{data[i + j + len / 2][0], data[i + j + len / 2][1]};
+    //       data[i + j][0] = u[0] + v[0] * w[0] - v[1] * w[1];
+    //       data[i + j][1] = u[1] + v[0] * w[1] + v[1] * w[0];
+    //       data[i + j + len / 2][0] = u[0] - v[0] * w[0] + v[1] * w[1];
+    //       data[i + j + len / 2][1] = u[1] - v[0] * w[1] - v[1] * w[0];
+    //     }
+    //   }
+    // }
+
+    fftw_plan p = fftw_plan_dft_1d(size_t{1} << n_pow, data, data, FFTW_FORWARD, FFTW_ESTIMATE);
     fftw_execute(p);
     fftw_destroy_plan(p);
   }
 
+  // j = -i
+  static __m256d mul_by_j(__m256d vec) {
+    return _mm256_xor_pd(_mm256_permute_pd(vec, 5), _mm256_set_pd(-0., 0., -0., 0.));
+  }
+
+  static __m256d load_w(size_t n, size_t cos, size_t sin) {
+    __m128d reals = _mm_load_pd(&cosines[n + cos]);
+    __m128d imags = _mm_load_pd(&cosines[n + sin]);
+    return _mm256_set_m128d(
+      _mm_unpackhi_pd(reals, imags),
+      _mm_unpacklo_pd(reals, imags)
+    );
+  };
+
+  static __m256d mul(__m256d a, __m256d b) {
+    __m256d prod1 = _mm256_xor_pd(_mm256_mul_pd(a, b), _mm256_set_pd(-0., 0., -0., 0.));
+    __m256d prod2 = _mm256_mul_pd(a, _mm256_permute_pd(b, 5));
+    return _mm256_hadd_pd(prod1, prod2);
+  }
+
+  static constexpr int FFT_CUTOFF = 14;
+  static constexpr int CT8_CUTOFF = 15;
+  static constexpr int FFT_MIN = FFT_CUTOFF - 1;  // -1 due to real-fft size halving optimization
+  static constexpr int FFT_MAX = 20;
+
+  static void fft_cooley_tukey_no_transpose_4(fftw_complex* data, int n_pow) {
+    size_t old_n = size_t{1} << n_pow;
+
+    while (n_pow > 2) {
+      size_t n = size_t{1} << n_pow;
+      size_t n2 = size_t{1} << (n_pow - 2);
+
+      for (fftw_complex* cur_data = data; cur_data != data + old_n; cur_data += n) {
+        for (size_t i = 0; i < n2; i += 2) {
+          __m256d a0 = _mm256_load_pd(cur_data[i]);
+          __m256d a1 = _mm256_load_pd(cur_data[n2 + i]);
+          __m256d a2 = _mm256_load_pd(cur_data[n2 * 2 + i]);
+          __m256d a3 = _mm256_load_pd(cur_data[n2 * 3 + i]);
+
+          __m256d c0 = _mm256_add_pd(a0, a2);
+          __m256d c1 = _mm256_add_pd(a1, a3);
+          __m256d c2 = _mm256_sub_pd(a0, a2);
+          __m256d c3 = mul_by_j(_mm256_sub_pd(a1, a3));
+
+          __m256d b0 = _mm256_add_pd(c0, c1);
+          __m256d b1 = _mm256_add_pd(c2, c3);
+          __m256d b2 = _mm256_sub_pd(c0, c1);
+          __m256d b3 = _mm256_sub_pd(c2, c3);
+
+          __m256d w1 = load_w(n, i, i + n / 4);
+          __m256d w2 = load_w(n / 2, i, i + n / 8);
+          __m256d w3 = mul(w1, w2);
+
+          _mm256_store_pd(cur_data[i], b0);
+          _mm256_store_pd(cur_data[n2 + i], mul(w1, b1));
+          _mm256_store_pd(cur_data[n2 * 2 + i], mul(w2, b2));
+          _mm256_store_pd(cur_data[n2 * 3 + i], mul(w3, b3));
+        }
+      }
+
+      n_pow -= 2;
+    }
+
+    for (fftw_complex* cur_data = data; cur_data != data + old_n; cur_data += 4) {
+      __m256d a01 = _mm256_load_pd(cur_data[0]);
+      __m256d a23 = _mm256_load_pd(cur_data[2]);
+
+      __m256d c01 = _mm256_add_pd(a01, a23);
+      __m256d c23 = _mm256_xor_pd(_mm256_permute_pd(_mm256_sub_pd(a01, a23), 6), _mm256_set_pd(-0., 0., 0., 0.));
+
+      __m256d c02 = _mm256_permute2f128_pd(c01, c23, 0x20);
+      __m256d c13 = _mm256_permute2f128_pd(c01, c23, 0x31);
+
+      __m256d b01 = _mm256_add_pd(c02, c13);
+      __m256d b23 = _mm256_sub_pd(c02, c13);
+
+      _mm256_store_pd(cur_data[0], b01);
+      _mm256_store_pd(cur_data[2], b23);
+    }
+  }
+
+  static void fft_cooley_tukey_no_transpose_8(fftw_complex* data, int n_pow, int count3) {
+    if (count3 == 0) {
+      fft_cooley_tukey_no_transpose_4(data, n_pow);
+      return;
+    }
+
+    size_t n = size_t{1} << n_pow;
+    size_t n2 = size_t{1} << (n_pow - 3);
+
+    for (size_t i = 0; i < n2; i += 2) {
+      __m256d a0 = _mm256_load_pd(data[i]);
+      __m256d a1 = _mm256_load_pd(data[n2 + i]);
+      __m256d a2 = _mm256_load_pd(data[n2 * 2 + i]);
+      __m256d a3 = _mm256_load_pd(data[n2 * 3 + i]);
+      __m256d a4 = _mm256_load_pd(data[n2 * 4 + i]);
+      __m256d a5 = _mm256_load_pd(data[n2 * 5 + i]);
+      __m256d a6 = _mm256_load_pd(data[n2 * 6 + i]);
+      __m256d a7 = _mm256_load_pd(data[n2 * 7 + i]);
+
+      __m256d e0 = _mm256_add_pd(a0, a4);
+      __m256d e1 = _mm256_sub_pd(a0, a4);
+
+      __m256d f0 = _mm256_add_pd(a2, a6);
+      __m256d f1 = mul_by_j(_mm256_sub_pd(a2, a6));
+
+      __m256d c0 = _mm256_add_pd(e0, f0);
+      __m256d c1 = _mm256_add_pd(e1, f1);
+      __m256d c2 = _mm256_sub_pd(e0, f0);
+      __m256d c3 = _mm256_sub_pd(e1, f1);
+
+      __m256d g0 = _mm256_add_pd(a1, a5);
+      __m256d g1 = _mm256_sub_pd(a1, a5);
+
+      __m256d h0 = _mm256_add_pd(a3, a7);
+      __m256d h1 = mul_by_j(_mm256_sub_pd(a3, a7));
+
+      __m256d k0 = _mm256_mul_pd(_mm256_add_pd(g1, h1), _mm256_set1_pd(1. / std::sqrt(2.)));
+      __m256d k1 = _mm256_mul_pd(_mm256_sub_pd(g1, h1), _mm256_set1_pd(1. / std::sqrt(2.)));
+
+      __m256d d0 = _mm256_add_pd(g0, h0);
+      __m256d d1 = _mm256_add_pd(mul_by_j(k0), k0);
+      __m256d d2 = mul_by_j(_mm256_sub_pd(g0, h0));
+      __m256d d3 = _mm256_sub_pd(mul_by_j(k1), k1);
+
+      __m256d b0 = _mm256_add_pd(c0, d0);
+      __m256d b1 = _mm256_add_pd(c1, d1);
+      __m256d b2 = _mm256_add_pd(c2, d2);
+      __m256d b3 = _mm256_add_pd(c3, d3);
+      __m256d b4 = _mm256_sub_pd(c0, d0);
+      __m256d b5 = _mm256_sub_pd(c1, d1);
+      __m256d b6 = _mm256_sub_pd(c2, d2);
+      __m256d b7 = _mm256_sub_pd(c3, d3);
+
+      __m256d w1 = load_w(n, i, i + n / 4);
+      __m256d w2 = load_w(n / 2, i, i + n / 8);
+      __m256d w3 = mul(w1, w2);
+      __m256d w4 = load_w(n / 4, i, i + n / 16);
+      __m256d w5 = mul(w1, w4);
+      __m256d w6 = mul(w3, w3);
+      __m256d w7 = mul(w4, w3);
+
+      _mm256_store_pd(data[i], b0);
+      _mm256_store_pd(data[n2 + i], mul(w1, b1));
+      _mm256_store_pd(data[n2 * 2 + i], mul(w2, b2));
+      _mm256_store_pd(data[n2 * 3 + i], mul(w3, b3));
+      _mm256_store_pd(data[n2 * 4 + i], mul(w4, b4));
+      _mm256_store_pd(data[n2 * 5 + i], mul(w5, b5));
+      _mm256_store_pd(data[n2 * 6 + i], mul(w6, b6));
+      _mm256_store_pd(data[n2 * 7 + i], mul(w7, b7));
+    }
+
+    for (size_t offset = 0; offset < n; offset += n2) {
+      fft_cooley_tukey_no_transpose_8(data + offset, n_pow - 3, count3 - 1);
+    }
+  }
+
+  static constexpr std::pair<int, int> get_counts(int n_pow) {
+    int count3 = 0;
+    while (n_pow > CT8_CUTOFF) {
+      n_pow -= 3;
+      count3++;
+    }
+    if (n_pow % 2 == 1) {
+      n_pow -= 3;
+      count3++;
+    }
+    int count2 = n_pow / 2;
+    return {count3, count2};
+  }
+
+  template<int N_POW>
+  static uint64_t reverse_mixed_radix_const(uint64_t number) {
+    auto [count3, count2] = get_counts(N_POW);
+    return reverse_mixed_radix(number, count3, count2, N_POW);
+  }
+
+  template<int... Pows>
+  static uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number, std::integer_sequence<int, Pows...>) {
+    uint64_t (*dispatch[])(uint64_t) = {&reverse_mixed_radix_const<FFT_MIN + Pows>...};
+    return dispatch[n_pow - FFT_MIN](number);
+  }
+
+  static uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number) {
+    return reverse_mixed_radix_dyn(n_pow, number, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+  }
+
+  static auto fft_cooley_tukey(fftw_complex* data, int n_pow) {
+    ensure_twiddle_factors(n_pow);
+
+    // fft(data, n_pow);
+    // return [](size_t i) {
+    //   return i;
+    // };
+
+    int count3 = get_counts(n_pow).first;
+    fft_cooley_tukey_no_transpose_8(data, n_pow, count3);
+    return [n_pow](size_t i) {
+      return reverse_mixed_radix_dyn(n_pow, i);
+    };
+
+    // int count3 = n_pow >= CT8_CUTOFF ? (n_pow - CT8_CUTOFF + 2) / 3 : 0;
+    // int count2 = (n_pow - 3 * count3 - CT4_CUTOFF + 1) / 2;
+    // return [count3, count2, n_pow](size_t i) {
+    //   return reverse_mixed_radix(i, count3, count2, n_pow);
+    // };
+
+    // if (depth > 0) {
+    //   size_t n = size_t{1} << n_pow;
+    //   fftw_complex* transposed = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * n);
+    //   size_t from = 0;
+    //   for (size_t i = 0; i < n / 8; i++) {
+    //     size_t from1 = reverse_octal_digits((i + 1) * 8, n_pow, depth);
+    //     for (size_t j = 0; j < 8; j++) {
+    //       __builtin_prefetch(data[from1 + (j << (n_pow - 3))]);
+    //     }
+    //     for (size_t j = 0; j < 8; j++) {
+    //       _mm_stream_pd(transposed[i * 8 + j], _mm_load_pd(data[from + (j << (n_pow - 3))]));
+    //     }
+    //     from = from1;
+    //   }
+    //   std::memcpy(data, transposed, n * sizeof(fftw_complex));
+    //   free(transposed);
+    // }
+  }
+
   static int get_fft_n_pow(const BigInt& lhs, const BigInt& rhs) {
-    return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 4 - 1);
+    return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size() - 1) * 4 - 1);
+  }
+
+  static inline std::vector<double> cosines{0};
+  static void ensure_twiddle_factors(int want_n_pow) {
+    while (cosines.size() < (size_t{2} << want_n_pow)) {
+      size_t n = cosines.size();
+      cosines.resize(2 * n);
+      double coeff = 2 * M_PI / n;
+      for (size_t k = 0; k < n / 2; k++) {
+        double c = cos(coeff * k);
+        cosines[n + k] = c;
+        cosines[n + n / 2 + k] = -c;
+      }
+    }
   }
 
   static BigInt mul_fft(const BigInt& lhs, const BigInt& rhs) {
     int n_pow = get_fft_n_pow(lhs, rhs);
     size_t n = size_t{1} << n_pow;
 
-    // Split numbers into bytes
-    std::vector<fftw_complex> old_fft(n);
+    // Split numbers into words
+    fftw_complex* united_fft = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * n);
+    std::memset(united_fft, 0, sizeof(fftw_complex) * n);
 
     const uint16_t* lhs_data = reinterpret_cast<const uint16_t*>(lhs.data.data());
     for (size_t i = 0; i < lhs.data.size() * 4; i++) {
-      old_fft[i][0] = lhs_data[i];
+      united_fft[i][0] = lhs_data[i];
     }
     const uint16_t* rhs_data = reinterpret_cast<const uint16_t*>(rhs.data.data());
     for (size_t i = 0; i < rhs.data.size() * 4; i++) {
-      old_fft[i][1] = rhs_data[i];
+      united_fft[i][1] = rhs_data[i];
     }
 
-    fft(old_fft.data(), n_pow, false);
+    // Parallel FFT for lhs and rhs
+    auto united_fft_access = fft_cooley_tukey(united_fft, n_pow);
 
-    // Disentangle real and imaginary coefficients into lhs & rhs and perform multiplication
-    std::vector<fftw_complex> new_fft(n);
-    for (size_t i = 0; i < n; i++) {
+    // Disentangle real and imaginary values into values of lhs & rhs at roots of unity, and then
+    // compute FFT of the product as pointwise product of values of lhs and rhs at roots of unity
+    auto get_long_fft = [&](size_t i) {
       size_t ni = i == 0 ? 0 : n - i;
+      __builtin_prefetch(united_fft[united_fft_access(i + 8)]);
+      __builtin_prefetch(united_fft[united_fft_access(ni - 8)]);
+      auto z = united_fft[united_fft_access(i)];
+      auto nz = united_fft[united_fft_access(ni)];
+      double lhs_real = (z[0] + nz[0]) / 2;
+      double lhs_imag = (z[1] - nz[1]) / 2;
+      double rhs_real = (z[1] + nz[1]) / 2;
+      double rhs_imag = -(z[0] - nz[0]) / 2;
+      return std::make_pair(
+        lhs_real * rhs_real - lhs_imag * rhs_imag,
+        lhs_real * rhs_imag + lhs_imag * rhs_real
+      );
+    };
 
-      double lhs_real = (old_fft[i][0] + old_fft[ni][0]) / 2;
-      double rhs_real = (old_fft[i][1] + old_fft[ni][1]) / 2;
-
-      double rhs_imag = -(old_fft[i][0] - old_fft[ni][0]) / 2;
-      double lhs_imag = (old_fft[i][1] - old_fft[ni][1]) / 2;
-
-      new_fft[i][0] = lhs_real * rhs_real - lhs_imag * rhs_imag;
-      new_fft[i][1] = lhs_real * rhs_imag + lhs_imag * rhs_real;
+    // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i q(x)) by using the
+    // fact that p(x) and q(x) have real coefficients, so that we only perform half the work
+    fftw_complex* short_fft = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * (n / 2));
+    for (size_t i = 0; i < n / 2; i++) {
+      double w_real = cosines[n + n / 4 + i];
+      double w_imag = cosines[n + i];
+      auto [real1, imag1] = get_long_fft(i);
+      auto [real2, imag2] = get_long_fft(n / 2 + i);
+      short_fft[i][0] = (real1 + real2 + w_real * (real1 - real2) - w_imag * (imag1 - imag2)) / 2;
+      short_fft[i][1] = (imag1 + imag2 + w_real * (imag1 - imag2) + w_imag * (real1 - real2)) / 2;
     }
-    fft(new_fft.data(), n_pow, true);
+
+    free(united_fft);
+
+    auto short_fft_access = fft_cooley_tukey(short_fft, n_pow - 1);
 
     BigInt result;
     result.data.increase_size(size_t{1} << (n_pow - 2));
@@ -739,17 +1039,25 @@ class BigInt {
     uint64_t carry = 0;
     double max_error = 0;
     uint16_t* data = reinterpret_cast<uint16_t*>(result.data.data());
-    for (size_t i = 0; i < n; i++) {
-      max_error = std::max(max_error, abs(new_fft[i][1] / n));
-      double fp_value = new_fft[i][0] / n;
-      uint64_t value = static_cast<uint64_t>(fp_value + 0.5);
-      max_error = std::max(max_error, abs(fp_value - value));
-      carry += value;
-      data[i] = static_cast<uint16_t>(carry);
-      carry >>= 16;
+    for (size_t i = 0; i < n / 2; i++) {
+      size_t ni = i == 0 ? 0 : n / 2 - i;
+      __builtin_prefetch(short_fft[short_fft_access(ni - 8)]);
+      auto z = short_fft[short_fft_access(ni)];
+      for (size_t j = 0; j < 2; j++) {
+        double fp_value = z[j] / (n / 2);
+        uint64_t value = static_cast<uint64_t>(fp_value + 0.5);
+        max_error = std::max(max_error, abs(fp_value - value));
+        carry += value;
+        *data++ = static_cast<uint16_t>(carry);
+        carry >>= 16;
+      }
     }
 
-    // std::cerr << max_error << " " << n_pow << std::endl;
+    free(short_fft);
+
+    // if (max_error >= 0.05) {
+    //   std::cerr << max_error << " " << n_pow << std::endl;
+    // }
     assert(max_error < 0.4);
 
     if (carry > 0) {
@@ -759,6 +1067,9 @@ class BigInt {
         result.data.pop_back();
       }
     }
+
+    // std::cerr << lhs.data.size() + rhs.data.size() << " -> " << result.data.size() << std::endl;
+    assert(result.data.size() == lhs.data.size() + rhs.data.size() || result.data.size() == lhs.data.size() + rhs.data.size() - 1);
 
     return result;
   }
@@ -1022,7 +1333,7 @@ public:
       return {};
     }
     int n_pow = get_fft_n_pow(*this, rhs);
-    if (n_pow >= 12) {
+    if (n_pow >= FFT_CUTOFF) {
       return mul_fft(*this, rhs);
     }
     BigInt result;
@@ -1087,18 +1398,58 @@ bigint::BigInt parse_message(const std::string &s) {
 } // namespace base64
 
 int main(int argc, char** argv) {
-  // const size_t N = 1 << 24;
-  // fftw_complex* in = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
-  // fftw_complex* out = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
-  // for (size_t i = 0; i < N; i++) {
-  //   in[i][0] = rand();
-  //   in[i][1] = rand();
-  // }
-  // fftw_plan p = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+  using Int = bigint::BigInt;
+
+  const int N_POW = 20;
+  const size_t N = 1 << N_POW;
+
   // int start = clock();
-  // fftw_execute(p);
-  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
-  // fftw_destroy_plan(p);  
+  // uint64_t sum = 0;
+  // for (uint64_t i = 0; i < 1000000000; i++) {
+  //   sum += bigint::reverse_mixed_radix(i, 3, 5, 19);
+  // }
+  // std::cerr << sum << " " << (float)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  // return 0;
+
+  // std::vector<int> indices(N);
+  // std::iota(indices.begin(), indices.end(), 0);
+  // Int::fft_cooley_tukey_transpose(indices.data(), N_POW);
+  // for (int i = 0; i < N; i++) {
+  //   assert(indices[i] == bigint::reverse_octal_digits(i, N_POW, 2));
+  // }
+  // std::cerr << std::endl;
+  // return 0;
+
+  // for (int j = 0; j < 2; j++) {
+  //   srand(1);
+  //   fftw_complex* data = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+  //   for (size_t i = 0; i < N; i++) {
+  //     data[i][0] = (double)rand() / 1e5;
+  //     data[i][1] = (double)rand() / 1e5;
+  //   }
+  //   if (j == 0) {
+  //     Int::fft(data, N_POW);
+  //   } else {
+  //     Int::fft_cooley_tukey(data, N_POW);
+  //   }
+  //   int start = clock();
+  //   if (j == 0) {
+  //     Int::fft(data, N_POW);
+  //   } else {
+  //     auto a = Int::fft_cooley_tukey(data, N_POW);
+  //     double sum = 0;
+  //     for (size_t i = 0; i < N; i++) {
+  //       sum += data[a(i)][0];
+  //     }
+  //     std::cerr << sum << std::endl;
+  //   }
+  //   // for (int i = 0; i < N; i++) {
+  //   //   std::cerr << std::complex(data[i][0], data[i][1]) << ' ';
+  //   // }
+  //   // std::cerr << std::endl;
+  //   std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  //   free(data);
+  // }
   // return 0;
 
   // uint32_t p, g, k;
@@ -1110,8 +1461,6 @@ int main(int argc, char** argv) {
 
   // auto msg = base64::parse_message(message);
   // std::cout << msg << std::endl;
-
-  using Int = bigint::BigInt;
 
   // int n_pow = 24;
   // std::vector<bigint::Complex4> data(1 << (n_pow - 2));
@@ -1136,31 +1485,30 @@ int main(int argc, char** argv) {
   srand(atoi(argv[1]));
 
   std::string s;
-  for (int i = 0; i < 4000; i++) {
+  for (int i = 0; i < 1200000; i++) {
     s.push_back('0' + rand() % 10);
   }
 
   // std::cout << s.size() << std::endl;
 
   // mpz_class a(s);
+  // mpz_class b = a;
+  // int start = clock();
   Int a = {s.c_str(), bigint::with_base{10}};
 
-  // int start = clock();
-  // for(size_t i = 0; i < 1000000; i++) {
-  //   a + a;
-  // }
-  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+  // std::cerr << a.data.size() << std::endl;
+
+  int start = clock();
+  for (int i = 0; i < 10; i++) {
+    // (mpz_class)(a * b);
+    a * a;
+    // ((a * a) * (a * a)) * ((a * a) * (a * a));
+  }
+  std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
 
   // std::cerr << std::endl;
-  std::cout << a << std::endl;
-  std::cout << s << std::endl;
-
-  // int start = clock();
-  // for(int i = 0; i < 100; i++) {
-  //   a * a;
-  // }
-  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
-  // std::cerr << a.data.size() << std::endl;
+  // std::cout << a << std::endl;
+  // std::cout << s << std::endl;
 
   return 0;
 }
