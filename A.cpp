@@ -997,7 +997,7 @@ class BigInt {
       _mm256_store_pd(short_fft[i], g);
     }
 
-    delete[] united_fft;
+    ::operator delete[](united_fft, std::align_val_t(32));
 
     auto short_fft_access = fft_cooley_tukey(short_fft, n_pow - 1);
 
@@ -1037,7 +1037,7 @@ class BigInt {
       carry = static_cast<uint64_t>(tmp >> 64);
     }
 
-    delete[] short_fft;
+    ::operator delete[](short_fft, std::align_val_t(32));
 
     __m128d max_error_vec128 =
         _mm_max_pd(_mm256_castpd256_pd128(max_error_vec),
