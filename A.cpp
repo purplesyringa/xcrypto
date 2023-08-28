@@ -1,5 +1,4 @@
 #include <gmpxx.h>
-#include <fftw3.h>
 #include <cstring>
 #include <complex>
 #include <algorithm>
@@ -714,14 +713,16 @@ class BigInt {
   static constexpr int FFT_MIN = FFT_CUTOFF - 1;  // -1 due to real-fft size halving optimization
   static constexpr int FFT_MAX = 20;
 
-  static void fft_cooley_tukey_no_transpose_4(fftw_complex* data, int n_pow) {
+  using Complex = double[2];
+
+  static void fft_cooley_tukey_no_transpose_4(Complex* data, int n_pow) {
     size_t old_n = size_t{1} << n_pow;
 
     while (n_pow > 2) {
       size_t n = size_t{1} << n_pow;
       size_t n2 = size_t{1} << (n_pow - 2);
 
-      for (fftw_complex* cur_data = data; cur_data != data + old_n; cur_data += n) {
+      for (Complex* cur_data = data; cur_data != data + old_n; cur_data += n) {
         for (size_t i = 0; i < n2; i += 2) {
           __m256d a0 = _mm256_load_pd(cur_data[i]);
           __m256d a1 = _mm256_load_pd(cur_data[n2 + i]);
@@ -752,7 +753,7 @@ class BigInt {
       n_pow -= 2;
     }
 
-    for (fftw_complex* cur_data = data; cur_data != data + old_n; cur_data += 4) {
+    for (Complex* cur_data = data; cur_data != data + old_n; cur_data += 4) {
       __m256d a01 = _mm256_load_pd(cur_data[0]);
       __m256d a23 = _mm256_load_pd(cur_data[2]);
 
@@ -770,7 +771,7 @@ class BigInt {
     }
   }
 
-  static void fft_cooley_tukey_no_transpose_8(fftw_complex* data, int n_pow, int count3) {
+  static void fft_cooley_tukey_no_transpose_8(Complex* data, int n_pow, int count3) {
     if (count3 == 0) {
       fft_cooley_tukey_no_transpose_4(data, n_pow);
       return;
@@ -988,7 +989,7 @@ class BigInt {
     };
   }
 
-  static auto fft_cooley_tukey(fftw_complex* data, int n_pow) {
+  static auto fft_cooley_tukey(Complex* data, int n_pow) {
     ensure_twiddle_factors(n_pow);
     int count3 = get_counts(n_pow).first;
     fft_cooley_tukey_no_transpose_8(data, n_pow, count3);
@@ -1032,8 +1033,8 @@ class BigInt {
     size_t n = size_t{1} << n_pow;
 
     // Split numbers into words
-    fftw_complex* united_fft = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * n);
-    std::memset(united_fft, 0, sizeof(fftw_complex) * n);
+    Complex* united_fft = new(std::align_val_t(32)) Complex[n];
+    std::memset(united_fft, 0, sizeof(Complex) * n);
 
     const uint16_t* lhs_data = reinterpret_cast<const uint16_t*>(lhs.data.data());
     for (size_t i = 0; i < lhs.data.size() * 4; i++) {
@@ -1073,7 +1074,7 @@ class BigInt {
 
     // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i q(x)) by using the
     // fact that p(x) and q(x) have real coefficients, so that we only perform half the work
-    fftw_complex* short_fft = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * (n / 2));
+    Complex* short_fft = new(std::align_val_t(32)) Complex[n / 2];
     for (size_t i = 0; i < n / 2; i += 2) {
       size_t ni0a = i == 0 ? 0 : n - i;
       size_t ni1a = n - i - 1;
@@ -1098,7 +1099,7 @@ class BigInt {
       _mm256_store_pd(short_fft[i], g);
     }
 
-    free(united_fft);
+    delete[] united_fft;
 
     auto short_fft_access = fft_cooley_tukey(short_fft, n_pow - 1);
 
@@ -1139,7 +1140,7 @@ class BigInt {
       carry = tmp >> 64;
     }
 
-    free(short_fft);
+    delete[] short_fft;
 
     __m128d max_error_vec128 = _mm_max_pd(
       _mm256_castpd256_pd128(max_error_vec),
