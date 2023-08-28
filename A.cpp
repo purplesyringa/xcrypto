@@ -69,108 +69,6 @@
 
 namespace bigint {
 
-// constexpr std::pair<uint64_t, int>
-// virtual_base_to_physical(uint64_t virtual_base) {
-//   uint64_t physical_base = 1;
-//   int multiplier = 0;
-//   while (physical_base <= SIZE_MAX / virtual_base) {
-//     physical_base *= virtual_base;
-//     multiplier++;
-//   }
-//   return {physical_base, multiplier};
-// }
-
-// template <uint64_t VirtualBase> class BaseMixin {
-//   static constexpr uint64_t PHYSICAL_BASE =
-//       virtual_base_to_physical(VirtualBase).first;
-
-// public:
-//   constexpr uint64_t get_virtual_base() const { return VirtualBase; }
-//   constexpr uint64_t get_physical_base() const { return PHYSICAL_BASE; }
-//   constexpr uint64_t get_multiplier() const {
-//     return virtual_base_to_physical(VirtualBase).second;
-//   }
-
-//   constexpr std::pair<uint64_t, uint64_t> phy_divmod(uint64_t value) const {
-//     return {value / PHYSICAL_BASE, value % PHYSICAL_BASE};
-//   }
-//   constexpr std::pair<uint64_t, bool> phy_add_carry(uint64_t a, uint64_t b,
-//                                                     bool carry) const {
-//     if constexpr (PHYSICAL_BASE <= 0x8000000000000000ULL) {
-//       uint64_t sum = a + b + carry;
-//       if (sum >= PHYSICAL_BASE) {
-//         return {sum - PHYSICAL_BASE, 1};
-//       } else {
-//         return {sum, 0};
-//       }
-//     } else {
-//       unsigned long long carry1 = 0;
-//       uint64_t sum = __builtin_addcll(a, b, carry, &carry1);
-//       if (sum >= PHYSICAL_BASE) {
-//         carry1 = 1;
-//       }
-//       if (carry1) {
-//         sum -= PHYSICAL_BASE;
-//       }
-//       return {sum, carry1};
-//     }
-//   }
-
-//   constexpr std::pair<uint64_t, uint64_t> virt_divmod(uint64_t value) const {
-//     return {value / get_virtual_base(), value % get_virtual_base()};
-//   }
-
-//   constexpr bool operator==(const BaseMixin &rhs) const { return true; }
-// };
-
-// template <> class BaseMixin<0> {
-//   uint64_t virtual_base;
-//   uint64_t physical_base;
-//   uint64_t multiplier;
-//   libdivide::divisor virt_divisor;
-//   libdivide::divisor phy_divisor;
-
-// public:
-//   BaseMixin(uint64_t virtual_base) : virtual_base(virtual_base) {
-//     std::tie(physical_base, multiplier) =
-//         virtual_base_to_physical(virtual_base);
-//     virt_divisor = libdivide::divisor{virtual_base};
-//     phy_divisor = libdivide::divisor{physical_base};
-//   }
-
-//   uint64_t get_virtual_base() const { return virtual_base; }
-//   uint64_t get_physical_base() const { return physical_base; }
-//   uint64_t get_multiplier() const { return multiplier; }
-
-//   std::pair<uint64_t, uint64_t> phy_divmod(uint64_t value) const {
-//     uint64_t div = value / phy_divisor;
-//     uint64_t mod = value - div * physical_base;
-//     return {div, mod};
-//   }
-//   std::pair<uint64_t, bool> phy_add_carry(uint64_t a, uint64_t b,
-//                                           bool carry) const {
-//     unsigned long long carry1;
-//     uint64_t sum = __builtin_addcll(a, b, carry, &carry1);
-//     if (sum >= get_physical_base()) {
-//       carry1 = 1;
-//     }
-//     if (carry1) {
-//       sum -= get_physical_base();
-//     }
-//     return {sum, carry1};
-//   }
-
-//   std::pair<uint64_t, uint64_t> virt_divmod(uint64_t value) const {
-//     uint64_t div = value / virt_divisor;
-//     uint64_t mod = value - div * virtual_base;
-//     return {div, mod};
-//   }
-
-//   bool operator==(const BaseMixin &rhs) const {
-//     return virtual_base == rhs.virtual_base;
-//   }
-// };
-
 struct with_base {
   uint64_t base;
 };
@@ -379,7 +277,6 @@ uint64_t reverse_bits(uint64_t number, int length) {
 }
 
 class BigInt {
-  // Stores 32-bit numbers
   SmallVec data;
 
   template <typename Iterator, typename Map>
@@ -648,42 +545,23 @@ class BigInt {
       return;
     }
 
-    size_t lhs_offset = 0;
-    // while (lhs.data[lhs_offset] == 0) {
-    //   lhs_offset++;
-    // }
-    size_t rhs_offset = 0;
-    // while (rhs.data[rhs_offset] == 0) {
-    //   rhs_offset++;
-    // }
-    offset += lhs_offset + rhs_offset;
-
-    BigInt new_lhs, new_rhs;
-    new_lhs.data.init(const_cast<uint64_t*>(lhs.data.data()) + lhs_offset, lhs.data.size() - lhs_offset);
-    new_rhs.data.init(const_cast<uint64_t*>(rhs.data.data()) + rhs_offset, rhs.data.size() - rhs_offset);
-
-    if (new_lhs.data.size() == 1 && new_rhs.data.size() == 1) {
-      mul_1x1(result, new_lhs, new_rhs, offset);
-    } else if (new_rhs.data.size() == 1) {
-      mul_nx1(result, new_lhs, new_rhs.data[0], offset);
-    } else if (new_lhs.data.size() == 1) {
-      mul_nx1(result, new_rhs, new_lhs.data[0], offset);
-    // } else if (std::min(l->data.size(), r->data.size()) >= 384) {
-    //   mul_toom3(*l, *r);
-    } else if (std::min(new_lhs.data.size(), new_rhs.data.size()) >= 40) {
-      if (new_lhs.data.size() * 2 < new_rhs.data.size()) {
-        mul_disproportional(result, new_lhs, new_rhs, offset);
-      } else if (new_rhs.data.size() * 2 < new_lhs.data.size()) {
-        mul_disproportional(result, new_rhs, new_lhs, offset);
+    if (lhs.data.size() == 1 && rhs.data.size() == 1) {
+      mul_1x1(result, lhs, rhs, offset);
+    } else if (rhs.data.size() == 1) {
+      mul_nx1(result, lhs, rhs.data[0], offset);
+    } else if (lhs.data.size() == 1) {
+      mul_nx1(result, rhs, lhs.data[0], offset);
+    } else if (std::min(lhs.data.size(), rhs.data.size()) >= 40) {
+      if (lhs.data.size() * 2 < rhs.data.size()) {
+        mul_disproportional(result, lhs, rhs, offset);
+      } else if (rhs.data.size() * 2 < lhs.data.size()) {
+        mul_disproportional(result, rhs, lhs, offset);
       } else {
-        mul_karatsuba(result, new_lhs, new_rhs, offset);
+        mul_karatsuba(result, lhs, rhs, offset);
       }
     } else {
-      mul_quadratic(result, new_lhs, new_rhs, offset);
+      mul_quadratic(result, lhs, rhs, offset);
     }
-
-    new_lhs.data.forget();
-    new_rhs.data.forget();
   }
 
   // j = -i
@@ -1455,130 +1333,10 @@ public:
   }
 };
 
-// class BigIntView {
-//   BigInt value;
-
-// public:
-//   operator BigInt&() {
-//     return value;
-//   }
-//   operator const BigInt&() const {
-//     return value;
-//   }
-// };
-
 } // namespace bigint
-
-namespace base64 {
-
-uint8_t parse_char(char symbol) {
-  if (symbol >= 48 && symbol <= 57)
-    return symbol - 48;
-  if (symbol >= 65 && symbol <= 90)
-    return symbol - 55;
-  if (symbol >= 97 && symbol <= 122)
-    return symbol - 61;
-  if (symbol == 32)
-    return 62;
-  if (symbol == 46)
-    return 63;
-  return 64;
-}
-
-bigint::BigInt parse_message(const std::string &s) {
-  std::vector<uint8_t> chars(s.size());
-  for (size_t i = 0; i < s.size(); i++) {
-    chars[i] = parse_char(s[i]);
-  }
-  return {chars, bigint::with_base{64}};
-}
-
-} // namespace base64
 
 int main(int argc, char** argv) {
   using Int = bigint::BigInt;
-
-  const int N_POW = 20;
-  const size_t N = 1 << N_POW;
-
-  // int start = clock();
-  // uint64_t sum = 0;
-  // for (uint64_t i = 0; i < 1000000000; i++) {
-  //   sum += bigint::reverse_mixed_radix(i, 3, 5, 19);
-  // }
-  // std::cerr << sum << " " << (float)(clock() - start) / CLOCKS_PER_SEC << std::endl;
-  // return 0;
-
-  // std::vector<int> indices(N);
-  // std::iota(indices.begin(), indices.end(), 0);
-  // Int::fft_cooley_tukey_transpose(indices.data(), N_POW);
-  // for (int i = 0; i < N; i++) {
-  //   assert(indices[i] == bigint::reverse_octal_digits(i, N_POW, 2));
-  // }
-  // std::cerr << std::endl;
-  // return 0;
-
-  // for (int j = 0; j < 2; j++) {
-  //   srand(1);
-  //   fftw_complex* data = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
-  //   for (size_t i = 0; i < N; i++) {
-  //     data[i][0] = (double)rand() / 1e5;
-  //     data[i][1] = (double)rand() / 1e5;
-  //   }
-  //   if (j == 0) {
-  //     Int::fft(data, N_POW);
-  //   } else {
-  //     Int::fft_cooley_tukey(data, N_POW);
-  //   }
-  //   int start = clock();
-  //   if (j == 0) {
-  //     Int::fft(data, N_POW);
-  //   } else {
-  //     auto a = Int::fft_cooley_tukey(data, N_POW);
-  //     double sum = 0;
-  //     for (size_t i = 0; i < N; i++) {
-  //       sum += data[a(i)][0];
-  //     }
-  //     std::cerr << sum << std::endl;
-  //   }
-  //   // for (int i = 0; i < N; i++) {
-  //   //   std::cerr << std::complex(data[i][0], data[i][1]) << ' ';
-  //   // }
-  //   // std::cerr << std::endl;
-  //   std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
-  //   free(data);
-  // }
-  // return 0;
-
-  // uint32_t p, g, k;
-  // std::cin >> p >> g >> k;
-
-  // std::string message;
-  // std::getline(std::cin, message);
-  // std::getline(std::cin, message);
-
-  // auto msg = base64::parse_message(message);
-  // std::cout << msg << std::endl;
-
-  // int n_pow = 24;
-  // std::vector<bigint::Complex4> data(1 << (n_pow - 2));
-  // for(bigint::Complex4& block: data) {
-  //   for(double& x : block.real) {
-  //     x = rand();
-  //   }
-  //   for(double& y : block.imag) {
-  //     y = rand();
-  //   }
-  // }
-
-  // int start = clock();
-  // Int::fft(data.data(), n_pow, false);
-  // std::cerr << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
-
-  // Int a{};
-
-  // Int a = 1;
-  // a += 2;
 
   srand(atoi(argv[1]));
 
@@ -1586,8 +1344,6 @@ int main(int argc, char** argv) {
   for (int i = 0; i < 1200000; i++) {
     s.push_back('0' + rand() % 10);
   }
-
-  // std::cout << s.size() << std::endl;
 
   // mpz_class a(s);
   // mpz_class b = a;
