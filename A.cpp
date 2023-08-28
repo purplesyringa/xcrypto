@@ -1004,11 +1004,9 @@ class BigInt {
     // Disentangle real and imaginary values into values of lhs & rhs at roots of unity, and then
     // compute FFT of the product as pointwise product of values of lhs and rhs at roots of unity
     size_t united_fft_one = united_fft_access(1);
-    auto get_long_fft_times4 = [&](size_t i) {
-      size_t ni0 = i == 0 ? 0 : n - i;
-      size_t ni1 = n - i - 1;
-      auto [ai, ai4] = united_fft_access(i, i + 4);
-      auto [ani0, ani1, ani04, ani14] = united_fft_access(ni0, ni1, ni0 - 4, ni1 - 4);
+    auto get_long_fft_times4 = [&](
+      size_t ai, size_t ai4, size_t ani0, size_t ani1, size_t ani04, size_t ani14
+    ) {
       __builtin_prefetch(united_fft[ai4]);
       __builtin_prefetch(united_fft[ai4 | united_fft_one]);
       __builtin_prefetch(united_fft[ani04]);
@@ -1031,8 +1029,15 @@ class BigInt {
     // fact that p(x) and q(x) have real coefficients, so that we only perform half the work
     fftw_complex* short_fft = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * (n / 2));
     for (size_t i = 0; i < n / 2; i += 2) {
-      __m256d a = get_long_fft_times4(i);
-      __m256d b = get_long_fft_times4(n / 2 + i);
+      size_t ni0a = i == 0 ? 0 : n - i;
+      size_t ni1a = n - i - 1;
+      size_t ni0b = n / 2 - i;
+      size_t ni1b = n / 2 - i - 1;
+      auto [aia, aia4, aib, aib4] = united_fft_access(i, i + 4, n / 2 + i, n / 2 + i + 4);
+      auto [ani0a, ani1a, ani0a4, ani1a4] = united_fft_access(ni0a, ni1a, ni0a - 4, ni1a - 4);
+      auto [ani0b, ani1b, ani0b4, ani1b4] = united_fft_access(ni0b, ni1b, ni0b - 4, ni1b - 4);
+      __m256d a = get_long_fft_times4(aia, aia4, ani0a, ani1a, ani0a4, ani1a4);
+      __m256d b = get_long_fft_times4(aib, aib4, ani0b, ani1b, ani0b4, ani1b4);
       __m128d w_real01 = _mm_load_pd(&cosines[n + n / 4 + i]);
       __m256d w_real0011 = _mm256_permute4x64_pd(_mm256_castpd128_pd256(w_real01), 0x50);
       __m128d w_imag01 = _mm_load_pd(&cosines[n + i]);
