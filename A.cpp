@@ -1,3 +1,5 @@
+#pragma GCC target("avx2,fma")
+
 #include <algorithm>
 #include <array>
 #include <cassert>
