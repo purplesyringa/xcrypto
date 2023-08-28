@@ -894,10 +894,11 @@ class BigInt {
 
   static inline std::vector<double> cosines{0};
   static void ensure_twiddle_factors(int want_n_pow) {
+    static constexpr double PI = 3.1415926535897931;
     while (cosines.size() < (size_t{2} << want_n_pow)) {
       size_t n = cosines.size();
       cosines.resize(2 * n);
-      double coeff = 2 * M_PI / static_cast<double>(n);
+      double coeff = 2 * PI / static_cast<double>(n);
       for (size_t k = 0; k < n / 2; k++) {
         double c = std::cos(coeff * static_cast<double>(k));
         cosines[n + k] = c;
