@@ -358,7 +358,8 @@ class BigInt {
       unrolled_loop_count--;
       left_loop_count = 4;
     }
-    asm("test %[unrolled_loop_count], %[unrolled_loop_count];"
+    asm volatile(
+        "test %[unrolled_loop_count], %[unrolled_loop_count];"
         "jz 2f;"
         "1:"
         "mov (%[rhs_data_ptr],%[offset]), %[value1];"
@@ -1144,7 +1145,8 @@ public:
     size_t i = 0;
     uint64_t value = 0;
     size_t loop_count = std::min(data.size(), rhs.data.size());
-    asm("clc;"
+    asm volatile(
+        "clc;"
         "1:"
         "mov (%[rhs_data_ptr],%[i],8), %[value];"
         "adc %[value], (%[data_ptr],%[i],8);"
@@ -1204,7 +1206,8 @@ public:
       unrolled_loop_count--;
       left_loop_count = 4;
     }
-    asm("test %[unrolled_loop_count], %[unrolled_loop_count];"
+    asm volatile(
+        "test %[unrolled_loop_count], %[unrolled_loop_count];"
         "jz 2f;"
         "1:"
         "mov (%[rhs_data_ptr],%[offset]), %[value1];"
