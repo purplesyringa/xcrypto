@@ -783,7 +783,7 @@ class BigInt {
 #pragma GCC optimize("O2")
 #endif
   template <int N_POW, int... Iterator3, int... Iterator2>
-  __attribute__((always_inline)) static __m256i
+  __attribute__((always_inline, sysv_abi)) static __m256i
   reverse_mixed_radix_const256_impl(__m256i number,
                                     std::integer_sequence<int, Iterator3...>,
                                     std::integer_sequence<int, Iterator2...>) {
@@ -825,7 +825,8 @@ class BigInt {
     return result;
   }
   template <int N_POW>
-  static __m256i reverse_mixed_radix_const256(__m256i number) {
+  __attribute__((sysv_abi)) static __m256i
+  reverse_mixed_radix_const256(__m256i number) {
     static constexpr int COUNT3 = get_counts(N_POW).first;
     static constexpr int COUNT2 = get_counts(N_POW).second;
     return reverse_mixed_radix_const256_impl<N_POW>(
@@ -844,11 +845,11 @@ class BigInt {
     return dispatch[n_pow - FFT_MIN](number);
   }
   template <int... Pows>
-  __attribute__((always_inline)) static __m256i
+  __attribute__((sysv_abi)) static __m256i
   reverse_mixed_radix_dyn(int n_pow, __m256i vec,
                           std::integer_sequence<int, Pows...>) {
-    static constexpr __m256i (*dispatch[])(__m256i) = {
-        &reverse_mixed_radix_const256<FFT_MIN + Pows>...};
+    static constexpr __m256i(__attribute__((sysv_abi)) * dispatch[])(
+        __m256i) = {&reverse_mixed_radix_const256<FFT_MIN + Pows>...};
     register __m256i ymm0 asm("ymm0") = vec;
     asm volatile("call *%[addr];"
                  : "+x"(ymm0)
