@@ -298,7 +298,7 @@ class BigInt {
           str_to_int_128(begin, end, base, max_block_len, base_product, map);
       return;
     } else if (end - begin <= 200 * max_block_len) {
-      int first_block_len = (end - begin) % max_block_len;
+      int first_block_len = static_cast<int>((end - begin) % max_block_len);
       if (first_block_len == 0) {
         first_block_len = max_block_len;
       }
@@ -407,7 +407,7 @@ class BigInt {
     for (size_t i = 0; i < lhs.data.size(); i++) {
       __uint128_t total = __uint128_t{lhs.data[i]} * rhs + carry;
       result.data[offset + i] = static_cast<uint64_t>(total);
-      carry = total >> 64;
+      carry = static_cast<uint64_t>(total >> 64);
     }
     if (carry != 0) {
       result.data[offset + lhs.data.size()] = carry;
@@ -1033,7 +1033,7 @@ class BigInt {
                             << 16))
                           << 16));
       result.data[i / 2] = static_cast<uint64_t>(tmp);
-      carry = tmp >> 64;
+      carry = static_cast<uint64_t>(tmp >> 64);
     }
 
     delete[] short_fft;
@@ -1282,7 +1282,7 @@ public:
     for (size_t i = 0; i < data.size(); i++) {
       __uint128_t total = __uint128_t{data[i]} * rhs + carry;
       data[i] = static_cast<uint64_t>(total);
-      carry = total >> 64;
+      carry = static_cast<uint64_t>(total >> 64);
     }
     if (carry != 0) {
       data.push_back(carry);
@@ -1328,14 +1328,14 @@ public:
 
 } // namespace bigint
 
-int main(int argc, char **argv) {
+int main() {
   using Int = bigint::BigInt;
 
-  std::srand(static_cast<unsigned>(std::atoi(argv[1])));
+  std::srand(1);
 
   std::string s;
   for (int i = 0; i < 1200000; i++) {
-    s.push_back('0' + rand() % 10);
+    s.push_back(static_cast<char>('0' + rand() % 2));
   }
 
   // mpz_class a(s);
