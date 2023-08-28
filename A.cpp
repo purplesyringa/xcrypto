@@ -379,25 +379,6 @@ uint64_t reverse_bits(uint64_t number, int length) {
   return number;
 }
 
-uint64_t reverse_mixed_radix(uint64_t number, int count3, int count2, int n_pow) {
-  auto shiftl = [](int x, int shift) {
-    if (shift > 0) {
-      return x << shift;
-    } else {
-      return x >> (-shift);
-    }
-  };
-
-  uint64_t result = 0;
-  for (int i = 0; i < count3; i++) {
-    result |= shiftl(number & (7 << (i * 3)), n_pow - (i * 2 + 1) * 3);
-  }
-  for (int i = 0; i < count2; i++) {
-    result |= shiftl(number & (3 << (count3 * 3 + i * 2)), n_pow - count3 * 3 * 2 - (i * 2 + 1) * 2);
-  }
-  return result;
-}
-
 class BigInt {
   // Stores 32-bit numbers
   SmallVec data;
@@ -879,60 +860,122 @@ class BigInt {
     return {count3, count2};
   }
 
+  static uint64_t shiftl(uint64_t x, int shift) {
+    if (shift > 0) {
+      return x << shift;
+    } else {
+      return x >> (-shift);
+    }
+  }
+  __attribute__((always_inline))
+  static __m256i shiftl(__m256i x, int shift) {
+    if (shift > 0) {
+      return _mm256_slli_epi64(x, shift);
+    } else {
+      return _mm256_srli_epi64(x, -shift);
+    }
+  }
+
   template<int N_POW>
   static uint64_t reverse_mixed_radix_const64(uint64_t number) {
-    auto [count3, count2] = get_counts(N_POW);
-    return reverse_mixed_radix(number, count3, count2, N_POW);
+    static constexpr int COUNT3 = get_counts(N_POW).first;
+    static constexpr int COUNT2 = get_counts(N_POW).second;
+    uint64_t result = 0;
+    for (int i = 0; i < COUNT3; i++) {
+      result |= shiftl(number & (7 << (i * 3)), N_POW - (i * 2 + 1) * 3);
+    }
+    for (int i = 0; i < COUNT2; i++) {
+      result |= shiftl(number & (3 << (COUNT3 * 3 + i * 2)), N_POW - COUNT3 * 3 * 2 - (i * 2 + 1) * 2);
+    }
+    return result;
   }
-  // With a sufficient optimization level, vectorized functions don't use any GPRs. Enforcing this
-  // guarantee as a caller convention helps prevent the caller from spilling registers
+#pragma GCC push_options
+#pragma GCC optimize("O2")
+  template<int N_POW, int... Iterator3, int... Iterator2>
+  __attribute__((always_inline))
+  static __m256i reverse_mixed_radix_const256_impl(
+    __m256i number,
+    std::integer_sequence<int, Iterator3...>,
+    std::integer_sequence<int, Iterator2...>
+  ) {
+    static constexpr int COUNT3 = get_counts(N_POW).first;
+    static constexpr int COUNT2 = get_counts(N_POW).second;
+    // Trick the compiler into believing the state of ymm{1..7} has to be preserved during the
+    // function execution so that we are free to remove these registers from clobber list when
+    // dynamically calling this function
+    register __m256d ymm1 asm("ymm1");
+    register __m256d ymm2 asm("ymm2");
+    register __m256d ymm3 asm("ymm3");
+    register __m256d ymm4 asm("ymm4");
+    register __m256d ymm5 asm("ymm5");
+    register __m256d ymm6 asm("ymm6");
+    register __m256d ymm7 asm("ymm7");
+    // Save the state of the registers at the beginning of the function
+    asm volatile(
+      ""
+      : "=x"(ymm1), "=x"(ymm2), "=x"(ymm3), "=x"(ymm4), "=x"(ymm5), "=x"(ymm6), "=x"(ymm7)
+    );
+    __m256i result = _mm256_setzero_si256();
+    ((
+      result = _mm256_or_si256(
+        result,
+        shiftl(
+          _mm256_and_si256(number, _mm256_set1_epi64x(7 << (Iterator3 * 3))),
+          N_POW - (Iterator3 * 2 + 1) * 3
+        )
+      )
+    ), ...);
+    ((
+      result = _mm256_or_si256(
+        result,
+        shiftl(
+          _mm256_and_si256(number, _mm256_set1_epi64x(3 << (COUNT3 * 3 + Iterator2 * 2))),
+          N_POW - COUNT3 * 3 * 2 - (Iterator2 * 2 + 1) * 2
+        )
+      )
+    ), ...);
+    // Restore the state of the registers. Prevent reordering of `asm volatile` with computation of
+    // the result by specifying the latter as an input
+    asm volatile(
+      ""
+      :
+      : "x"(result), "x"(ymm1), "x"(ymm2), "x"(ymm3), "x"(ymm4), "x"(ymm5), "x"(ymm6), "x"(ymm7)
+    );
+    return result;
+  }
   template<int N_POW>
-  __attribute__((preserve_most))
-  static __m128i reverse_mixed_radix_const128(__m128i vec) {
-    // This should be autovectorized
-    return _mm_set_epi64x(
-      reverse_mixed_radix_const64<N_POW>(_mm_extract_epi64(vec, 1)),
-      reverse_mixed_radix_const64<N_POW>(_mm_extract_epi64(vec, 0))
+  static __m256i reverse_mixed_radix_const256(__m256i number) {
+    static constexpr int COUNT3 = get_counts(N_POW).first;
+    static constexpr int COUNT2 = get_counts(N_POW).second;
+    return reverse_mixed_radix_const256_impl<N_POW>(
+      number,
+      std::make_integer_sequence<int, COUNT3>(),
+      std::make_integer_sequence<int, COUNT2>()
     );
   }
-  template<int N_POW>
-  __attribute__((preserve_most))
-  static __m256i reverse_mixed_radix_const256(__m256i vec) {
-    // This should be autovectorized
-    return _mm256_set_epi64x(
-      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 3)),
-      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 2)),
-      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 1)),
-      reverse_mixed_radix_const64<N_POW>(_mm256_extract_epi64(vec, 0))
-    );
-  }
+#pragma GCC pop_options
 
   template<int... Pows>
   static uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number, std::integer_sequence<int, Pows...>) {
-    uint64_t (*dispatch[])(uint64_t) = {&reverse_mixed_radix_const64<FFT_MIN + Pows>...};
+    static constexpr uint64_t (*dispatch[])(uint64_t) = {&reverse_mixed_radix_const64<FFT_MIN + Pows>...};
     return dispatch[n_pow - FFT_MIN](number);
   }
   template<int... Pows>
-  static __m128i reverse_mixed_radix_dyn(int n_pow, __m128i vec, std::integer_sequence<int, Pows...>) {
-    __m128i (*dispatch[])(__m128i) __attribute__((preserve_most)) = {&reverse_mixed_radix_const128<FFT_MIN + Pows>...};
-    return dispatch[n_pow - FFT_MIN](vec);
-  }
-  template<int... Pows>
+  __attribute__((always_inline))
   static __m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec, std::integer_sequence<int, Pows...>) {
-    __m256i (*dispatch[])(__m256i) __attribute__((preserve_most)) = {&reverse_mixed_radix_const256<FFT_MIN + Pows>...};
-    return dispatch[n_pow - FFT_MIN](vec);
+    static constexpr __m256i (*dispatch[])(__m256i) = {&reverse_mixed_radix_const256<FFT_MIN + Pows>...};
+    register __m256i ymm0 asm("ymm0") = vec;
+    asm volatile(
+      "call *%[addr];"
+      : "+x"(ymm0)
+      : [addr] "m"(dispatch[n_pow - FFT_MIN])
+      : "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm13", "ymm14", "ymm15"
+    );
+    return ymm0;
   }
 
   static uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number) {
     return reverse_mixed_radix_dyn(n_pow, number, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
-  }
-  static std::array<uint64_t, 2> reverse_mixed_radix_dyn(int n_pow, uint64_t a, uint64_t b) {
-    // This should be autovectorized
-    auto res = reverse_mixed_radix_dyn(n_pow, _mm_set_epi64x(b, a), std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
-    return {
-      static_cast<uint64_t>(_mm_extract_epi64(res, 0)),
-      static_cast<uint64_t>(_mm_extract_epi64(res, 1))
-    };
   }
   static std::array<uint64_t, 4> reverse_mixed_radix_dyn(int n_pow, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
     // This should be autovectorized
@@ -976,11 +1019,12 @@ class BigInt {
   // Only work for inputs in the range: [0, 2^52)
   static __m256i double_to_uint64(__m256d x) {
     x = _mm256_add_pd(x, _mm256_set1_pd(0x0010000000000000));
-    return _mm256_xor_pd(x, _mm256_set1_pd(0x0010000000000000));
+    return _mm256_castpd_si256(_mm256_xor_pd(x, _mm256_set1_pd(0x0010000000000000)));
   }
   static __m256d uint64_to_double(__m256i x) {
-    x = _mm256_or_pd(x, _mm256_set1_pd(0x0010000000000000));
-    return _mm256_sub_pd(x, _mm256_set1_pd(0x0010000000000000));
+    auto y = _mm256_castsi256_pd(x);
+    y = _mm256_or_pd(y, _mm256_set1_pd(0x0010000000000000));
+    return _mm256_sub_pd(y, _mm256_set1_pd(0x0010000000000000));
   }
 
   static BigInt mul_fft(const BigInt& lhs, const BigInt& rhs) {
@@ -1550,7 +1594,7 @@ int main(int argc, char** argv) {
   // std::cerr << a.data.size() << std::endl;
 
   int start = clock();
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < 100; i++) {
     // (mpz_class)(a * b);
     a * a;
     // ((a * a) * (a * a)) * ((a * a) * (a * a));
