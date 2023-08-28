@@ -777,6 +777,8 @@ class BigInt {
       return;
     }
 
+    static const __m256d rsqrt2 = _mm256_set1_pd(1. / std::sqrt(2.));
+
     size_t n = size_t{1} << n_pow;
     size_t n2 = size_t{1} << (n_pow - 3);
 
@@ -807,8 +809,8 @@ class BigInt {
       __m256d h0 = _mm256_add_pd(a3, a7);
       __m256d h1 = mul_by_j(_mm256_sub_pd(a3, a7));
 
-      __m256d k0 = _mm256_mul_pd(_mm256_add_pd(g1, h1), _mm256_set1_pd(1. / std::sqrt(2.)));
-      __m256d k1 = _mm256_mul_pd(_mm256_sub_pd(g1, h1), _mm256_set1_pd(1. / std::sqrt(2.)));
+      __m256d k0 = _mm256_mul_pd(_mm256_add_pd(g1, h1), rsqrt2);
+      __m256d k1 = _mm256_mul_pd(_mm256_sub_pd(g1, h1), rsqrt2);
 
       __m256d d0 = _mm256_add_pd(g0, h0);
       __m256d d1 = _mm256_add_pd(mul_by_j(k0), k0);
