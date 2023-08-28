@@ -1036,6 +1036,8 @@ class BigInt {
       auto [aia, aia4, aib, aib4] = united_fft_access(i, i + 4, n / 2 + i, n / 2 + i + 4);
       auto [ani0a, ani1a, ani0a4, ani1a4] = united_fft_access(ni0a, ni1a, ni0a - 4, ni1a - 4);
       auto [ani0b, ani1b, ani0b4, ani1b4] = united_fft_access(ni0b, ni1b, ni0b - 4, ni1b - 4);
+      __builtin_prefetch(&cosines[n + n / 4 + i + 6]);
+      __builtin_prefetch(&cosines[n + i + 6]);
       __m256d a = get_long_fft_times4(aia, aia4, ani0a, ani1a, ani0a4, ani1a4);
       __m256d b = get_long_fft_times4(aib, aib4, ani0b, ani1b, ani0b4, ani1b4);
       __m128d w_real01 = _mm_load_pd(&cosines[n + n / 4 + i]);
