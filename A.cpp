@@ -391,6 +391,9 @@ public:
 
   BigInt &operator*=(uint64_t rhs);
 
+  void _normalize();
+  void _normalize_nonzero();
+
   friend class ConstRef;
 };
 
@@ -406,6 +409,21 @@ public:
   Ref slice(size_t l, size_t size) { return {Span{data.data() + l, size}}; }
   ConstRef slice(size_t l) const;
   ConstRef slice(size_t l, size_t size) const;
+
+  Ref normalized() {
+    Span tmp = data;
+    while (!tmp.empty() && tmp.back() == 0) {
+      tmp.pop_back();
+    }
+    return {tmp};
+  }
+  Ref normalize_nonzero() {
+    Span tmp = data;
+    while (tmp.back() == 0) {
+      tmp.pop_back();
+    }
+    return {tmp};
+  }
 };
 
 class ConstRef {
@@ -426,6 +444,21 @@ public:
   explicit operator BigInt() const {
     return {SmallVec{data.data(), data.size()}};
   }
+
+  ConstRef normalized() {
+    ConstSpan tmp = data;
+    while (!tmp.empty() && tmp.back() == 0) {
+      tmp.pop_back();
+    }
+    return {tmp};
+  }
+  ConstRef normalize_nonzero() {
+    ConstSpan tmp = data;
+    while (tmp.back() == 0) {
+      tmp.pop_back();
+    }
+    return {tmp};
+  }
 };
 
 ConstRef Ref::slice(size_t l) const {
@@ -444,6 +477,17 @@ ConstRef BigInt::slice(size_t l) const {
 }
 ConstRef BigInt::slice(size_t l, size_t size) const {
   return static_cast<ConstRef>(*this).slice(l, size);
+}
+
+void BigInt::_normalize() {
+  while (!data.empty() && data.back() == 0) {
+    data.pop_back();
+  }
+}
+void BigInt::_normalize_nonzero() {
+  while (data.back() == 0) {
+    data.pop_back();
+  }
 }
 
 inline void add_at_no_resize(Ref lhs, ConstRef rhs) {
@@ -977,9 +1021,7 @@ inline BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   if (carry > 0) {
     result.data.push_back(carry);
   } else {
-    while (result.data.back() == 0) {
-      result.data.pop_back();
-    }
+    result._normalize_nonzero();
   }
 
   // std::cerr << lhs.data.size() + rhs.data.size() << " -> " <<
@@ -1143,10 +1185,7 @@ BigInt &BigInt::operator-=(ConstRef rhs) {
       : [data_ptr] "r"(data.data()), [rhs_data_ptr] "r"(rhs.data.data())
       : "flags", "memory");
 
-  while (!data.empty() && data.back() == 0) {
-    data.pop_back();
-  }
-
+  _normalize();
   return *this;
 }
 
@@ -1268,16 +1307,10 @@ __attribute__((noinline)) inline void mul_quadratic(Ref result, ConstRef lhs,
 inline void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
   size_t b = std::min(lhs.data.size(), rhs.data.size()) / 2;
 
-  ConstRef x0 = lhs.slice(0, b);
+  ConstRef x0 = lhs.slice(0, b).normalized();
   ConstRef x1 = lhs.slice(b);
-  ConstRef y0 = rhs.slice(0, b);
+  ConstRef y0 = rhs.slice(0, b).normalized();
   ConstRef y1 = rhs.slice(b);
-  while (!x0.data.empty() && x0.data.back() == 0) {
-    x0.data.pop_back();
-  }
-  while (!y0.data.empty() && y0.data.back() == 0) {
-    y0.data.pop_back();
-  }
 
   mul_to(result, x0, y0);
   size_t z0_len = 0;
@@ -1302,22 +1335,12 @@ inline void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
 
 inline void mul_disproportional(Ref result, ConstRef lhs, ConstRef rhs) {
   assert(lhs.data.size() < rhs.data.size());
-
-  ConstRef rhs_chunk = rhs.slice(0, lhs.data.size());
-  while (!rhs_chunk.data.empty() && rhs_chunk.data.back() == 0) {
-    rhs_chunk.data.pop_back();
-  }
-  mul_to(result, lhs, rhs_chunk);
-
+  mul_to(result, lhs, rhs.slice(0, lhs.data.size()).normalized());
   size_t i = lhs.data.size();
   for (; i + lhs.data.size() < rhs.data.size(); i += lhs.data.size()) {
-    ConstRef rhs_chunk = rhs.slice(i, lhs.data.size());
-    while (!rhs_chunk.data.empty() && rhs_chunk.data.back() == 0) {
-      rhs_chunk.data.pop_back();
-    }
-    add_at_no_resize(result.slice(i), lhs * rhs_chunk);
+    add_at_no_resize(result.slice(i),
+                     lhs * rhs.slice(i, lhs.data.size()).normalized());
   }
-
   add_at_no_resize(result.slice(i), lhs * rhs.slice(i));
 }
 
@@ -1356,9 +1379,7 @@ BigInt operator*(ConstRef lhs, ConstRef rhs) {
   BigInt result;
   result.data.increase_size_zerofill(lhs.data.size() + rhs.data.size());
   mul_to(result, lhs, rhs);
-  while (result.data.back() == 0) {
-    result.data.pop_back();
-  }
+  result._normalize_nonzero();
   return result;
 }
 
