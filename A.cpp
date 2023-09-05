@@ -70,6 +70,8 @@ struct with_base {
   uint64_t base;
 };
 
+class ConstSpan;
+
 class SmallVec {
   static constexpr size_t INLINE_STORAGE_SIZE = 8;
 
@@ -114,28 +116,8 @@ public:
     _size = size;
   }
 
-  void init(uint64_t *data, size_t size) {
-    _begin = data;
-    _size = size;
-    _capacity = 0;
-  }
-  void forget() {
-    _begin = _inline_storage;
-    _size = 0;
-    _capacity = INLINE_STORAGE_SIZE;
-  }
-
-  SmallVec(const SmallVec &rhs) {
-    if (rhs._size <= INLINE_STORAGE_SIZE) {
-      _begin = _inline_storage;
-      _capacity = INLINE_STORAGE_SIZE;
-    } else {
-      _begin = new uint64_t[rhs._size];
-      _capacity = rhs._size;
-    }
-    std::copy(rhs._begin, rhs._begin + rhs._size, _begin);
-    _size = rhs._size;
-  }
+  SmallVec(ConstSpan rhs);
+  SmallVec(const SmallVec &rhs);
   SmallVec(SmallVec &&rhs) {
     if (rhs._begin == rhs._inline_storage) {
       _begin = _inline_storage;
@@ -150,18 +132,7 @@ public:
     rhs._capacity = 0;
   }
 
-  SmallVec &operator=(const SmallVec &rhs) {
-    if (rhs._size > _capacity) {
-      if (_begin != _inline_storage) {
-        delete[] _begin;
-      }
-      _begin = new uint64_t[rhs._size];
-      _capacity = rhs._size;
-    }
-    std::copy(rhs._begin, rhs._begin + rhs._size, _begin);
-    _size = rhs._size;
-    return *this;
-  }
+  SmallVec &operator=(ConstSpan rhs);
   SmallVec &operator=(SmallVec &&rhs) {
     if (_begin != _inline_storage) {
       delete[] _begin;
@@ -244,6 +215,52 @@ public:
   }
 
   uint64_t &back() { return _begin[_size - 1]; }
+  const uint64_t &back() const { return _begin[_size - 1]; }
+
+  uint64_t *begin() { return _begin; }
+  uint64_t *end() { return _begin + _size; }
+  const uint64_t *begin() const { return _begin; }
+  const uint64_t *end() const { return _begin + _size; }
+
+  std::reverse_iterator<uint64_t *> rbegin() {
+    return std::make_reverse_iterator(_begin + _size);
+  }
+  std::reverse_iterator<uint64_t *> rend() {
+    return std::make_reverse_iterator(_begin);
+  }
+  std::reverse_iterator<const uint64_t *> rbegin() const {
+    return std::make_reverse_iterator(_begin + _size);
+  }
+  std::reverse_iterator<const uint64_t *> rend() const {
+    return std::make_reverse_iterator(_begin);
+  }
+};
+
+class Span {
+  uint64_t *_begin;
+  size_t _size;
+
+public:
+  Span() : _begin(nullptr), _size(0) {}
+  Span(uint64_t *data, size_t size) : _begin(data), _size(size) {}
+  Span(SmallVec &vec) : _begin(vec.begin()), _size(vec.size()) {}
+  void set_size(size_t size) { _size = size; }
+
+  uint64_t &operator[](size_t i) { return _begin[i]; }
+  const uint64_t &operator[](size_t i) const { return _begin[i]; }
+
+  size_t size() const { return _size; }
+  bool empty() const { return _size == 0; }
+  uint64_t *data() { return _begin; }
+  const uint64_t *data() const { return _begin; }
+
+  void pop_back() { _size--; }
+
+  bool operator==(const Span &rhs) const {
+    return _size == rhs._size && std::equal(_begin, _begin + _size, rhs._begin);
+  }
+
+  uint64_t &back() { return _begin[_size - 1]; }
   uint64_t back() const { return _begin[_size - 1]; }
 
   uint64_t *begin() { return _begin; }
@@ -265,41 +282,84 @@ public:
   }
 };
 
-class BigInt {
-  SmallVec data;
-
-  template <typename Iterator, typename Map>
-  static BigInt str_to_int(Iterator begin, Iterator end, uint64_t base,
-                           Map map);
-
-  static void add_at_no_resize(BigInt &lhs, const BigInt &rhs,
-                               size_t lhs_offset);
-
-  static void mul_1x1(BigInt &result, const BigInt &lhs, const BigInt &rhs,
-                      size_t offset);
-
-  static void mul_nx1(BigInt &result, const BigInt &lhs, uint64_t rhs,
-                      size_t offset);
-
-  __attribute__((noinline)) static void mul_quadratic(BigInt &result,
-                                                      const BigInt &lhs,
-                                                      const BigInt &rhs,
-                                                      size_t offset);
-
-  static void mul_karatsuba(BigInt &result, const BigInt &lhs,
-                            const BigInt &rhs, size_t offset);
-
-  static void mul_disproportional(BigInt &result, const BigInt &lhs,
-                                  const BigInt &rhs, size_t offset);
-
-  static void mul_at(BigInt &result, const BigInt &lhs, const BigInt &rhs,
-                     size_t offset);
-
-  static int get_fft_n_pow(const BigInt &lhs, const BigInt &rhs);
-
-  static BigInt mul_fft(const BigInt &lhs, const BigInt &rhs);
+class ConstSpan {
+  const uint64_t *_begin;
+  size_t _size;
 
 public:
+  ConstSpan() : _begin(nullptr), _size(0) {}
+  ConstSpan(const uint64_t *data, size_t size) : _begin(data), _size(size) {}
+  ConstSpan(const SmallVec &vec) : _begin(vec.begin()), _size(vec.size()) {}
+  ConstSpan(Span span) : _begin(span.begin()), _size(span.size()) {}
+  void set_size(size_t size) { _size = size; }
+
+  const uint64_t &operator[](size_t i) const { return _begin[i]; }
+
+  size_t size() const { return _size; }
+  bool empty() const { return _size == 0; }
+  const uint64_t *data() const { return _begin; }
+
+  void pop_back() { _size--; }
+
+  bool operator==(const ConstSpan &rhs) const {
+    return _size == rhs._size && std::equal(_begin, _begin + _size, rhs._begin);
+  }
+
+  const uint64_t &back() const { return _begin[_size - 1]; }
+
+  const uint64_t *begin() const { return _begin; }
+  const uint64_t *end() const { return _begin + _size; }
+
+  std::reverse_iterator<const uint64_t *> rbegin() const {
+    return std::make_reverse_iterator(_begin + _size);
+  }
+  std::reverse_iterator<const uint64_t *> rend() const {
+    return std::make_reverse_iterator(_begin);
+  }
+};
+
+SmallVec::SmallVec(ConstSpan rhs) {
+  if (rhs.size() <= INLINE_STORAGE_SIZE) {
+    _begin = _inline_storage;
+    _capacity = INLINE_STORAGE_SIZE;
+  } else {
+    _begin = new uint64_t[rhs.size()];
+    _capacity = rhs.size();
+  }
+  std::copy(rhs.data(), rhs.data() + rhs.size(), _begin);
+  _size = rhs.size();
+}
+
+SmallVec::SmallVec(const SmallVec &rhs)
+    : SmallVec(static_cast<ConstSpan>(rhs)) {}
+
+SmallVec &SmallVec::operator=(ConstSpan rhs) {
+  if (rhs.size() > _capacity) {
+    if (_begin != _inline_storage) {
+      delete[] _begin;
+    }
+    _begin = new uint64_t[rhs.size()];
+    _capacity = rhs.size();
+  }
+  std::copy(rhs.data(), rhs.data() + rhs.size(), _begin);
+  _size = rhs.size();
+  return *this;
+}
+
+class Ref;
+class ConstRef;
+
+class BigInt {
+  Ref slice(size_t l);
+  Ref slice(size_t l, size_t size);
+  ConstRef slice(size_t l) const;
+  ConstRef slice(size_t l, size_t size) const;
+
+  BigInt(SmallVec data);
+
+public:
+  SmallVec data;
+
   BigInt();
 
   BigInt(__uint128_t value);
@@ -311,15 +371,15 @@ public:
   BigInt(std::string_view s, with_base base = {10});
   BigInt(const char *s, with_base base = {10});
 
+  BigInt(ConstRef rhs);
   BigInt(const BigInt &rhs);
   BigInt(BigInt &&rhs);
 
-  BigInt &operator=(const BigInt &rhs);
+  BigInt &operator=(ConstRef rhs);
   BigInt &operator=(BigInt &&rhs);
 
-  friend bool operator==(const BigInt &lhs, const BigInt &rhs);
-  friend bool operator<(const BigInt &lhs, const BigInt &rhs);
-
+  BigInt &operator+=(ConstRef rhs);
+  BigInt &operator-=(ConstRef rhs);
   BigInt &operator+=(const BigInt &rhs);
   BigInt &operator-=(const BigInt &rhs);
 
@@ -329,100 +389,64 @@ public:
   BigInt &operator--();
   BigInt operator--(int);
 
-  BigInt operator-(const BigInt &rhs) const &;
-  BigInt operator-(const BigInt &rhs) &&;
-
   BigInt &operator*=(uint64_t rhs);
 
-  BigInt operator*(uint64_t rhs) const &;
-  BigInt operator*(uint64_t rhs) &&;
-
-  BigInt operator*(const BigInt &rhs) const;
-
-  friend std::ostream &operator<<(std::ostream &out, const BigInt &rhs);
+  friend class ConstRef;
 };
 
-template <typename Iterator, typename Map>
-inline uint64_t str_to_int_64(Iterator begin, Iterator end, uint64_t base,
-                              Map map) {
-  uint64_t val = 0;
-  for (auto it = end; it != begin;) {
-    val *= base;
-    val += map(*--it);
+class Ref {
+public:
+  Span data;
+
+  Ref(Span data) : data(data) {}
+  Ref(BigInt &bigint) : data(bigint.data) {}
+  Ref(BigInt &&bigint) : data(bigint.data) {}
+
+  Ref slice(size_t l) { return {Span{data.data() + l, data.size() - l}}; }
+  Ref slice(size_t l, size_t size) { return {Span{data.data() + l, size}}; }
+  ConstRef slice(size_t l) const;
+  ConstRef slice(size_t l, size_t size) const;
+};
+
+class ConstRef {
+public:
+  ConstSpan data;
+
+  ConstRef(ConstSpan data) : data(data) {}
+  ConstRef(const BigInt &bigint) : data(bigint.data) {}
+  ConstRef(Ref ref) : data(ref.data) {}
+
+  ConstRef slice(size_t l) const {
+    return {ConstSpan{data.data() + l, data.size() - l}};
   }
-  return val;
-}
-
-template <typename Iterator, typename Map>
-inline __uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base,
-                                  int max_block_len, uint64_t base_product,
-                                  Map map) {
-  uint64_t low = str_to_int_64(begin, begin + max_block_len, base, map);
-  uint64_t high = str_to_int_64(begin + max_block_len, end, base, map);
-  return static_cast<__uint128_t>(high) * base_product + low;
-}
-
-template <typename Iterator, typename Map>
-inline void str_to_int_inplace(Iterator begin, Iterator end, uint64_t base,
-                               Map map, const BigInt *powers_of_base,
-                               int max_block_len, uint64_t base_product,
-                               BigInt &result) {
-  if (end - begin <= max_block_len) {
-    result += str_to_int_64(begin, end, base, map);
-    return;
-  } else if (end - begin <= 2 * max_block_len) {
-    result +=
-        str_to_int_128(begin, end, base, max_block_len, base_product, map);
-    return;
-  } else if (end - begin <= 200 * max_block_len) {
-    int first_block_len = static_cast<int>((end - begin) % max_block_len);
-    if (first_block_len == 0) {
-      first_block_len = max_block_len;
-    }
-    BigInt tmp = str_to_int_64(end - first_block_len, end, base, map);
-    for (end -= first_block_len; begin != end; end -= max_block_len) {
-      tmp *= base_product;
-      tmp += str_to_int_64(end - max_block_len, end, base, map);
-    }
-    result += tmp;
-    return;
+  ConstRef slice(size_t l, size_t size) const {
+    return {ConstSpan{data.data() + l, size}};
   }
 
-  int low_len_pow =
-      63 - __builtin_clzll(static_cast<uint64_t>(end - begin - 1));
-  ssize_t low_len = ssize_t{1} << low_len_pow;
-  Iterator mid = begin + low_len;
-  BigInt high;
-  str_to_int_inplace(mid, end, base, map, powers_of_base, max_block_len,
-                     base_product, high);
-  result += high * powers_of_base[low_len_pow];
-  str_to_int_inplace(begin, mid, base, map, powers_of_base, max_block_len,
-                     base_product, result);
+  explicit operator BigInt() const {
+    return {SmallVec{data.data(), data.size()}};
+  }
+};
+
+ConstRef Ref::slice(size_t l) const {
+  return static_cast<ConstRef>(*this).slice(l);
+}
+ConstRef Ref::slice(size_t l, size_t size) const {
+  return static_cast<ConstRef>(*this).slice(l, size);
 }
 
-template <typename Iterator, typename Map>
-BigInt BigInt::str_to_int(Iterator begin, Iterator end, uint64_t base,
-                          Map map) {
-  int max_block_len = 0;
-  uint64_t base_product = 1;
-  while (base_product <= static_cast<uint64_t>(-1) / base) {
-    max_block_len++;
-    base_product *= base;
-  }
-
-  std::vector<BigInt> powers_of_base{base};
-  while ((ssize_t{1} << powers_of_base.size()) <= end - begin) {
-    powers_of_base.push_back(powers_of_base.back() * powers_of_base.back());
-  }
-
-  BigInt result;
-  str_to_int_inplace(begin, end, base, map, powers_of_base.data(),
-                     max_block_len, base_product, result);
-  return result;
+Ref BigInt::slice(size_t l) { return static_cast<Ref>(*this).slice(l); }
+Ref BigInt::slice(size_t l, size_t size) {
+  return static_cast<Ref>(*this).slice(l, size);
+}
+ConstRef BigInt::slice(size_t l) const {
+  return static_cast<ConstRef>(*this).slice(l);
+}
+ConstRef BigInt::slice(size_t l, size_t size) const {
+  return static_cast<ConstRef>(*this).slice(l, size);
 }
 
-void BigInt::add_at_no_resize(BigInt &lhs, const BigInt &rhs,
-                              size_t lhs_offset) {
+inline void add_at_no_resize(Ref lhs, ConstRef rhs) {
   if (__builtin_expect(rhs.data.empty(), 0)) {
     return;
   }
@@ -465,8 +489,7 @@ void BigInt::add_at_no_resize(BigInt &lhs, const BigInt &rhs,
       : [offset] "+r"(offset), [value1] "=&r"(value1), [value2] "=&r"(value2),
         [unrolled_loop_count] "+r"(unrolled_loop_count),
         [left_loop_count] "+r"(left_loop_count)
-      : [data_ptr] "r"(lhs.data.data() + lhs_offset), [rhs_data_ptr] "r"(
-                                                          rhs.data.data())
+      : [data_ptr] "r"(lhs.data.data()), [rhs_data_ptr] "r"(rhs.data.data())
       : "flags", "memory");
 }
 
@@ -801,10 +824,6 @@ inline auto fft_cooley_tukey(Complex *data, int n_pow) {
       [n_pow](auto... args) { return reverse_mixed_radix_dyn(n_pow, args...); };
 }
 
-int BigInt::get_fft_n_pow(const BigInt &lhs, const BigInt &rhs) {
-  return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size() - 1) * 4 - 1);
-}
-
 // Credits to https://stackoverflow.com/a/41148578
 // Only work for inputs in the range: [0, 2^52)
 inline __m256i double_to_uint64(__m256d x) {
@@ -818,7 +837,11 @@ inline __m256d uint64_to_double(__m256i x) {
   return _mm256_sub_pd(y, _mm256_set1_pd(0x0010000000000000));
 }
 
-BigInt BigInt::mul_fft(const BigInt &lhs, const BigInt &rhs) {
+inline int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
+  return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size() - 1) * 4 - 1);
+}
+
+inline BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   int n_pow = get_fft_n_pow(lhs, rhs);
   size_t n = size_t{1} << n_pow;
 
@@ -967,6 +990,8 @@ BigInt BigInt::mul_fft(const BigInt &lhs, const BigInt &rhs) {
   return result;
 }
 
+BigInt::BigInt(SmallVec data) : data(data) {}
+
 BigInt::BigInt() {}
 
 BigInt::BigInt(__uint128_t value) {
@@ -984,32 +1009,14 @@ BigInt::BigInt(int value) {
   }
 }
 
-template <typename List, typename> BigInt::BigInt(List &&list, with_base base) {
-  *this = str_to_int(list.begin(), list.end(), base.base,
-                     [](uint64_t digit) { return digit; });
-}
-BigInt::BigInt(std::string_view s, with_base base) {
-  assert(base.base <= 36);
-  *this = str_to_int(s.rbegin(), s.rend(), base.base, [base](char c) {
-    uint64_t digit;
-    if ('0' <= c && c <= '9') {
-      digit = static_cast<uint64_t>(c - '0');
-    } else if ('a' <= c && c <= 'z') {
-      digit = static_cast<uint64_t>(c - 'a' + 10);
-    } else {
-      assert(false);
-    }
-    assert(digit < base.base);
-    return digit;
-  });
-}
 BigInt::BigInt(const char *s, with_base base)
     : BigInt(std::string_view(s), base) {}
 
+BigInt::BigInt(ConstRef rhs) : data(rhs.data) {}
 BigInt::BigInt(const BigInt &rhs) : data(rhs.data) {}
 BigInt::BigInt(BigInt &&rhs) : data(std::move(rhs.data)) {}
 
-BigInt &BigInt::operator=(const BigInt &rhs) {
+BigInt &BigInt::operator=(ConstRef rhs) {
   data = rhs.data;
   return *this;
 }
@@ -1019,23 +1026,21 @@ BigInt &BigInt::operator=(BigInt &&rhs) {
   return *this;
 }
 
-bool operator==(const BigInt &lhs, const BigInt &rhs) {
-  return lhs.data == rhs.data;
-}
-bool operator!=(const BigInt &lhs, const BigInt &rhs) { return !(lhs == rhs); }
+bool operator==(ConstRef lhs, ConstRef rhs) { return lhs.data == rhs.data; }
+bool operator!=(ConstRef lhs, ConstRef rhs) { return !(lhs == rhs); }
 
-bool operator<(const BigInt &lhs, const BigInt &rhs) {
+bool operator<(ConstRef lhs, ConstRef rhs) {
   if (lhs.data.size() != rhs.data.size()) {
     return lhs.data.size() < rhs.data.size();
   }
   return std::lexicographical_compare(lhs.data.rbegin(), lhs.data.rend(),
                                       rhs.data.rbegin(), rhs.data.rend());
 }
-bool operator>(const BigInt &lhs, const BigInt &rhs) { return rhs < lhs; }
-bool operator<=(const BigInt &lhs, const BigInt &rhs) { return !(rhs < lhs); }
-bool operator>=(const BigInt &lhs, const BigInt &rhs) { return !(lhs < rhs); }
+bool operator>(ConstRef lhs, ConstRef rhs) { return rhs < lhs; }
+bool operator<=(ConstRef lhs, ConstRef rhs) { return !(rhs < lhs); }
+bool operator>=(ConstRef lhs, ConstRef rhs) { return !(lhs < rhs); }
 
-BigInt &BigInt::operator+=(const BigInt &rhs) {
+BigInt &BigInt::operator+=(ConstRef rhs) {
   if (__builtin_expect(data.empty(), 0)) {
     return *this = rhs;
   } else if (__builtin_expect(rhs.data.empty(), 0)) {
@@ -1090,7 +1095,7 @@ BigInt &BigInt::operator+=(const BigInt &rhs) {
   return *this;
 }
 
-BigInt &BigInt::operator-=(const BigInt &rhs) {
+BigInt &BigInt::operator-=(ConstRef rhs) {
   if (rhs.data.empty()) {
     return *this;
   }
@@ -1145,16 +1150,18 @@ BigInt &BigInt::operator-=(const BigInt &rhs) {
   return *this;
 }
 
+BigInt &BigInt::operator+=(const BigInt &rhs) {
+  return *this += static_cast<ConstRef>(rhs);
+}
+BigInt &BigInt::operator-=(const BigInt &rhs) {
+  return *this -= static_cast<ConstRef>(rhs);
+}
+
 BigInt &BigInt::operator++() { return *this += 1; }
 BigInt BigInt::operator++(int) {
   BigInt tmp = *this;
   ++*this;
   return tmp;
-}
-
-BigInt operator+(BigInt lhs, const BigInt &rhs) {
-  lhs += rhs;
-  return lhs;
 }
 
 BigInt &BigInt::operator--() { return *this -= 1; }
@@ -1164,14 +1171,8 @@ BigInt BigInt::operator--(int) {
   return tmp;
 }
 
-BigInt BigInt::operator-(const BigInt &rhs) const & {
-  BigInt tmp = *this;
-  tmp -= rhs;
-  return tmp;
-}
-BigInt BigInt::operator-(const BigInt &rhs) && {
-  return std::move(*this -= rhs);
-}
+BigInt operator+(BigInt lhs, ConstRef rhs) { return lhs += rhs; }
+BigInt operator-(BigInt lhs, ConstRef rhs) { return lhs -= rhs; }
 
 BigInt &BigInt::operator*=(uint64_t rhs) {
   if (rhs == 0) {
@@ -1190,37 +1191,33 @@ BigInt &BigInt::operator*=(uint64_t rhs) {
   return *this;
 }
 
-BigInt BigInt::operator*(uint64_t rhs) const & {
-  BigInt tmp = *this;
-  tmp *= rhs;
-  return tmp;
-}
-BigInt BigInt::operator*(uint64_t rhs) && { return std::move(*this *= rhs); }
+BigInt operator*(BigInt lhs, uint64_t rhs) { return lhs *= rhs; }
 
-void BigInt::mul_1x1(BigInt &result, const BigInt &lhs, const BigInt &rhs,
-                     size_t offset) {
+BigInt operator*(ConstRef lhs, ConstRef rhs);
+inline void mul_to(Ref result, ConstRef lhs, ConstRef rhs);
+
+inline void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   __uint128_t product = __uint128_t{lhs.data[0]} * rhs.data[0];
-  result.data[offset] = static_cast<uint64_t>(product);
+  result.data[0] = static_cast<uint64_t>(product);
   if (product >= (__uint128_t{1} << 64)) {
-    result.data[offset + 1] = static_cast<uint64_t>(product >> 64);
+    result.data[1] = static_cast<uint64_t>(product >> 64);
   }
 }
 
-void BigInt::mul_nx1(BigInt &result, const BigInt &lhs, uint64_t rhs,
-                     size_t offset) {
+inline void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
   uint64_t carry = 0;
   for (size_t i = 0; i < lhs.data.size(); i++) {
     __uint128_t total = __uint128_t{lhs.data[i]} * rhs + carry;
-    result.data[offset + i] = static_cast<uint64_t>(total);
+    result.data[i] = static_cast<uint64_t>(total);
     carry = static_cast<uint64_t>(total >> 64);
   }
   if (carry != 0) {
-    result.data[offset + lhs.data.size()] = carry;
+    result.data[lhs.data.size()] = carry;
   }
 }
 
-void BigInt::mul_quadratic(BigInt &result, const BigInt &lhs, const BigInt &rhs,
-                           size_t offset) {
+__attribute__((noinline)) inline void mul_quadratic(Ref result, ConstRef lhs,
+                                                    ConstRef rhs) {
   size_t size = lhs.data.size() + rhs.data.size() - 1;
 
   uint64_t carry_low = 0;
@@ -1255,30 +1252,26 @@ void BigInt::mul_quadratic(BigInt &result, const BigInt &lhs, const BigInt &rhs,
       LOOP
     }
 
-    result.data[offset++] = sum_low;
+    result.data[i] = sum_low;
     carry_low = sum_mid;
     carry_high = sum_high;
   }
 
   if (carry_high > 0) {
-    result.data[offset++] = carry_low;
-    result.data[offset++] = carry_high;
+    result.data[size] = carry_low;
+    result.data[size + 1] = carry_high;
   } else if (carry_low > 0) {
-    result.data[offset++] = carry_low;
+    result.data[size] = carry_low;
   }
 }
 
-void BigInt::mul_karatsuba(BigInt &result, const BigInt &lhs, const BigInt &rhs,
-                           size_t offset) {
+inline void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
   size_t b = std::min(lhs.data.size(), rhs.data.size()) / 2;
 
-  BigInt x0, x1, y0, y1;
-  x0.data.init(const_cast<uint64_t *>(lhs.data.data()), b);
-  x1.data.init(const_cast<uint64_t *>(lhs.data.data()) + b,
-               lhs.data.size() - b);
-  y0.data.init(const_cast<uint64_t *>(rhs.data.data()), b);
-  y1.data.init(const_cast<uint64_t *>(rhs.data.data()) + b,
-               rhs.data.size() - b);
+  ConstRef x0 = lhs.slice(0, b);
+  ConstRef x1 = lhs.slice(b);
+  ConstRef y0 = rhs.slice(0, b);
+  ConstRef y1 = rhs.slice(b);
   while (!x0.data.empty() && x0.data.back() == 0) {
     x0.data.pop_back();
   }
@@ -1286,108 +1279,188 @@ void BigInt::mul_karatsuba(BigInt &result, const BigInt &lhs, const BigInt &rhs,
     y0.data.pop_back();
   }
 
-  mul_at(result, x0, y0, offset);
+  mul_to(result, x0, y0);
   size_t z0_len = 0;
   if (!x0.data.empty() && !y0.data.empty()) {
     z0_len = x0.data.size() + y0.data.size() - 1;
-    if (result.data[offset + z0_len] != 0) {
+    if (result.data[z0_len] != 0) {
       z0_len++;
     }
   }
-  BigInt z0;
-  z0.data.init(result.data.data() + offset, z0_len);
+  ConstRef z0 = result.slice(0, z0_len);
 
-  mul_at(result, x1, y1, offset + b * 2);
+  mul_to(result.slice(b * 2), x1, y1);
   size_t z2_len = x1.data.size() + y1.data.size() - 1;
-  if (result.data[offset + b * 2 + z2_len] != 0) {
+  if (result.data[b * 2 + z2_len] != 0) {
     z2_len++;
   }
-  BigInt z2;
-  z2.data.init(result.data.data() + offset + b * 2, z2_len);
+  ConstRef z2 = result.slice(b * 2, z2_len);
 
-  BigInt z1 = (x0 + x1) * (y0 + y1) - z0 - z2;
-  add_at_no_resize(result, z1, offset + b);
-
-  x0.data.forget();
-  x1.data.forget();
-  y0.data.forget();
-  y1.data.forget();
-  z0.data.forget();
-  z2.data.forget();
+  BigInt z1 = (BigInt{x0} + x1) * (BigInt{y0} + y1) - z0 - z2;
+  add_at_no_resize(result.slice(b), z1);
 }
 
-void BigInt::mul_disproportional(BigInt &result, const BigInt &lhs,
-                                 const BigInt &rhs, size_t offset) {
+inline void mul_disproportional(Ref result, ConstRef lhs, ConstRef rhs) {
   assert(lhs.data.size() < rhs.data.size());
 
-  BigInt rhs_chunk;
-
-  rhs_chunk.data.init(const_cast<uint64_t *>(rhs.data.data()), lhs.data.size());
+  ConstRef rhs_chunk = rhs.slice(0, lhs.data.size());
   while (!rhs_chunk.data.empty() && rhs_chunk.data.back() == 0) {
     rhs_chunk.data.pop_back();
   }
-  mul_at(result, lhs, rhs_chunk, offset);
+  mul_to(result, lhs, rhs_chunk);
 
   size_t i = lhs.data.size();
   for (; i + lhs.data.size() < rhs.data.size(); i += lhs.data.size()) {
-    rhs_chunk.data.init(const_cast<uint64_t *>(rhs.data.data()) + i,
-                        lhs.data.size());
+    ConstRef rhs_chunk = rhs.slice(i, lhs.data.size());
     while (!rhs_chunk.data.empty() && rhs_chunk.data.back() == 0) {
       rhs_chunk.data.pop_back();
     }
-    add_at_no_resize(result, lhs * rhs_chunk, offset + i);
+    add_at_no_resize(result.slice(i), lhs * rhs_chunk);
   }
 
-  rhs_chunk.data.init(const_cast<uint64_t *>(rhs.data.data()) + i,
-                      rhs.data.size() - i);
-  add_at_no_resize(result, lhs * rhs_chunk, offset + i);
-
-  rhs_chunk.data.forget();
+  add_at_no_resize(result.slice(i), lhs * rhs.slice(i));
 }
 
-void BigInt::mul_at(BigInt &result, const BigInt &lhs, const BigInt &rhs,
-                    size_t offset) {
+inline void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
   if (lhs.data.empty() || rhs.data.empty()) {
     return;
   }
 
   if (lhs.data.size() == 1 && rhs.data.size() == 1) {
-    mul_1x1(result, lhs, rhs, offset);
+    mul_1x1(result, lhs, rhs);
   } else if (rhs.data.size() == 1) {
-    mul_nx1(result, lhs, rhs.data[0], offset);
+    mul_nx1(result, lhs, rhs.data[0]);
   } else if (lhs.data.size() == 1) {
-    mul_nx1(result, rhs, lhs.data[0], offset);
+    mul_nx1(result, rhs, lhs.data[0]);
   } else if (std::min(lhs.data.size(), rhs.data.size()) >= 40) {
     if (lhs.data.size() * 2 < rhs.data.size()) {
-      mul_disproportional(result, lhs, rhs, offset);
+      mul_disproportional(result, lhs, rhs);
     } else if (rhs.data.size() * 2 < lhs.data.size()) {
-      mul_disproportional(result, rhs, lhs, offset);
+      mul_disproportional(result, rhs, lhs);
     } else {
-      mul_karatsuba(result, lhs, rhs, offset);
+      mul_karatsuba(result, lhs, rhs);
     }
   } else {
-    mul_quadratic(result, lhs, rhs, offset);
+    mul_quadratic(result, lhs, rhs);
   }
 }
 
-BigInt BigInt::operator*(const BigInt &rhs) const {
-  if (data.empty() || rhs.data.empty()) {
+BigInt operator*(ConstRef lhs, ConstRef rhs) {
+  if (lhs.data.empty() || rhs.data.empty()) {
     return {};
   }
-  int n_pow = get_fft_n_pow(*this, rhs);
+  int n_pow = get_fft_n_pow(lhs, rhs);
   if (n_pow >= FFT_CUTOFF) {
-    return mul_fft(*this, rhs);
+    return mul_fft(lhs, rhs);
   }
   BigInt result;
-  result.data.increase_size_zerofill(data.size() + rhs.data.size());
-  mul_at(result, *this, rhs, 0);
+  result.data.increase_size_zerofill(lhs.data.size() + rhs.data.size());
+  mul_to(result, lhs, rhs);
   while (result.data.back() == 0) {
     result.data.pop_back();
   }
   return result;
 }
 
-std::ostream &operator<<(std::ostream &out, const BigInt &rhs) {
+template <typename Iterator, typename Map>
+inline uint64_t str_to_int_64(Iterator begin, Iterator end, uint64_t base,
+                              Map map) {
+  uint64_t val = 0;
+  for (auto it = end; it != begin;) {
+    val *= base;
+    val += map(*--it);
+  }
+  return val;
+}
+
+template <typename Iterator, typename Map>
+inline __uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base,
+                                  int max_block_len, uint64_t base_product,
+                                  Map map) {
+  uint64_t low = str_to_int_64(begin, begin + max_block_len, base, map);
+  uint64_t high = str_to_int_64(begin + max_block_len, end, base, map);
+  return static_cast<__uint128_t>(high) * base_product + low;
+}
+
+template <typename Iterator, typename Map>
+inline void str_to_int_inplace(Iterator begin, Iterator end, uint64_t base,
+                               Map map, const BigInt *powers_of_base,
+                               int max_block_len, uint64_t base_product,
+                               BigInt &result) {
+  if (end - begin <= max_block_len) {
+    result += str_to_int_64(begin, end, base, map);
+    return;
+  } else if (end - begin <= 2 * max_block_len) {
+    result +=
+        str_to_int_128(begin, end, base, max_block_len, base_product, map);
+    return;
+  } else if (end - begin <= 200 * max_block_len) {
+    int first_block_len = static_cast<int>((end - begin) % max_block_len);
+    if (first_block_len == 0) {
+      first_block_len = max_block_len;
+    }
+    BigInt tmp = str_to_int_64(end - first_block_len, end, base, map);
+    for (end -= first_block_len; begin != end; end -= max_block_len) {
+      tmp *= base_product;
+      tmp += str_to_int_64(end - max_block_len, end, base, map);
+    }
+    result += tmp;
+    return;
+  }
+
+  int low_len_pow =
+      63 - __builtin_clzll(static_cast<uint64_t>(end - begin - 1));
+  ssize_t low_len = ssize_t{1} << low_len_pow;
+  Iterator mid = begin + low_len;
+  BigInt high;
+  str_to_int_inplace(mid, end, base, map, powers_of_base, max_block_len,
+                     base_product, high);
+  result += high * powers_of_base[low_len_pow];
+  str_to_int_inplace(begin, mid, base, map, powers_of_base, max_block_len,
+                     base_product, result);
+}
+
+template <typename Iterator, typename Map>
+inline BigInt str_to_int(Iterator begin, Iterator end, uint64_t base, Map map) {
+  int max_block_len = 0;
+  uint64_t base_product = 1;
+  while (base_product <= static_cast<uint64_t>(-1) / base) {
+    max_block_len++;
+    base_product *= base;
+  }
+
+  std::vector<BigInt> powers_of_base{base};
+  while ((ssize_t{1} << powers_of_base.size()) <= end - begin) {
+    powers_of_base.push_back(powers_of_base.back() * powers_of_base.back());
+  }
+
+  BigInt result;
+  str_to_int_inplace(begin, end, base, map, powers_of_base.data(),
+                     max_block_len, base_product, result);
+  return result;
+}
+
+template <typename List, typename> BigInt::BigInt(List &&list, with_base base) {
+  *this = str_to_int(list.begin(), list.end(), base.base,
+                     [](uint64_t digit) { return digit; });
+}
+BigInt::BigInt(std::string_view s, with_base base) {
+  assert(base.base <= 36);
+  *this = str_to_int(s.rbegin(), s.rend(), base.base, [base](char c) {
+    uint64_t digit;
+    if ('0' <= c && c <= '9') {
+      digit = static_cast<uint64_t>(c - '0');
+    } else if ('a' <= c && c <= 'z') {
+      digit = static_cast<uint64_t>(c - 'a' + 10);
+    } else {
+      assert(false);
+    }
+    assert(digit < base.base);
+    return digit;
+  });
+}
+
+std::ostream &operator<<(std::ostream &out, ConstRef rhs) {
   if (rhs.data.empty()) {
     return out << "0x0";
   }
