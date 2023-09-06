@@ -717,7 +717,7 @@ inline constexpr int FFT_CUTOFF = 14;
 inline constexpr int CT8_CUTOFF = 15;
 inline constexpr int FFT_MIN =
     FFT_CUTOFF - 1; // -1 due to real-fft size halving optimization
-inline constexpr int FFT_MAX = 20;
+inline constexpr int FFT_MAX = 19;
 
 inline constexpr std::pair<int, int> get_counts(int n_pow) {
   int count3 = 0;
@@ -1457,7 +1457,7 @@ inline void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
       mul_disproportional(result, lhs, rhs);
     } else if (rhs.data.size() * 2 < lhs.data.size()) {
       mul_disproportional(result, rhs, lhs);
-    } else if (std::min(lhs.data.size(), rhs.data.size()) >= 600) {
+    } else if (std::min(lhs.data.size(), rhs.data.size()) >= 2000) {
       mul_toom33(result, lhs, rhs);
     } else {
       mul_karatsuba(result, lhs, rhs);
@@ -1471,10 +1471,10 @@ BigInt operator*(ConstRef lhs, ConstRef rhs) {
   if (lhs.data.empty() || rhs.data.empty()) {
     return {};
   }
-  // int n_pow = get_fft_n_pow(lhs, rhs);
-  // if (n_pow >= FFT_CUTOFF) {
-  //   return mul_fft(lhs, rhs);
-  // }
+  int n_pow = get_fft_n_pow(lhs, rhs);
+  if (n_pow >= FFT_CUTOFF && n_pow <= FFT_MAX) {
+    return mul_fft(lhs, rhs);
+  }
   BigInt result;
   result.data.increase_size_zerofill(lhs.data.size() + rhs.data.size());
   mul_to(result, lhs, rhs);
@@ -1599,7 +1599,7 @@ int main() {
   std::srand(1);
 
   std::string s;
-  for (int i = 0; i < 10000000; i++) {
+  for (int i = 0; i < 50000000; i++) {
     s.push_back(static_cast<char>('0' + rand() % 10));
   }
 
