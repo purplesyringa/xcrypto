@@ -1100,56 +1100,10 @@ bool operator<=(ConstRef lhs, ConstRef rhs) { return !(rhs < lhs); }
 bool operator>=(ConstRef lhs, ConstRef rhs) { return !(lhs < rhs); }
 
 BigInt &BigInt::operator+=(ConstRef rhs) {
-  if (__builtin_expect(data.empty(), 0)) {
-    return *this = rhs;
-  } else if (__builtin_expect(rhs.data.empty(), 0)) {
-    return *this;
-  }
-
-  size_t i = 0;
-  uint64_t value = 0;
-  size_t loop_count = std::min(data.size(), rhs.data.size());
-  asm volatile(
-      "clc;"
-      "1:"
-      "mov (%[rhs_data_ptr],%[i],8), %[value];"
-      "adc %[value], (%[data_ptr],%[i],8);"
-      "inc %[i];"
-      "dec %[loop_count];"
-      "jnz 1b;"
-      "mov $0, %[value];"
-      "adc $0, %[value];"
-      : [i] "+r"(i), [value] "+r"(value), [loop_count] "+r"(loop_count)
-      : [data_ptr] "r"(data.data()), [rhs_data_ptr] "r"(rhs.data.data())
-      : "flags", "memory");
-
-  if (data.size() < rhs.data.size()) {
-    data.increase_size(rhs.data.size());
-    if (value) {
-      while (i < rhs.data.size() && rhs.data[i] == static_cast<uint64_t>(-1)) {
-        data[i] = 0;
-        i++;
-      }
-      if (__builtin_expect(i == rhs.data.size(), 0)) {
-        data.push_back(1);
-      } else {
-        data[i] = rhs.data[i] + 1;
-        i++;
-      }
-    }
-    std::copy(rhs.data.begin() + i, rhs.data.end(), data.begin() + i);
-  } else {
-    if (value) {
-      for (; i < data.size(); i++) {
-        data[i]++;
-        if (data[i] != 0) {
-          break;
-        }
-      }
-      if (__builtin_expect(i == data.size(), 0)) {
-        data.push_back(1);
-      }
-    }
+  data.increase_size_zerofill(std::max(data.size(), rhs.data.size()) + 1);
+  add_to(*this, rhs);
+  if (data.back() == 0) {
+    data.pop_back();
   }
   return *this;
 }
