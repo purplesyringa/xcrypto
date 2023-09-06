@@ -98,8 +98,8 @@ public:
       _begin = _inline_storage;
       _capacity = INLINE_STORAGE_SIZE;
     } else {
-      _begin = new uint64_t[list.size()];
-      _capacity = list.size();
+      _begin = new uint64_t[list.size() + 1];
+      _capacity = list.size() + 1;
     }
     std::copy(list.begin(), list.end(), _begin);
     _size = list.size();
@@ -109,8 +109,8 @@ public:
       _begin = _inline_storage;
       _capacity = INLINE_STORAGE_SIZE;
     } else {
-      _begin = new uint64_t[size];
-      _capacity = size;
+      _begin = new uint64_t[size + 1];
+      _capacity = size + 1;
     }
     std::copy(data, data + size, _begin);
     _size = size;
@@ -323,8 +323,8 @@ SmallVec::SmallVec(ConstSpan rhs) {
     _begin = _inline_storage;
     _capacity = INLINE_STORAGE_SIZE;
   } else {
-    _begin = new uint64_t[rhs.size()];
-    _capacity = rhs.size();
+    _begin = new uint64_t[rhs.size() + 1];
+    _capacity = rhs.size() + 1;
   }
   std::copy(rhs.data(), rhs.data() + rhs.size(), _begin);
   _size = rhs.size();
@@ -338,8 +338,8 @@ SmallVec &SmallVec::operator=(ConstSpan rhs) {
     if (_begin != _inline_storage) {
       delete[] _begin;
     }
-    _begin = new uint64_t[rhs.size()];
-    _capacity = rhs.size();
+    _begin = new uint64_t[rhs.size() + 1];
+    _capacity = rhs.size() + 1;
   }
   std::copy(rhs.data(), rhs.data() + rhs.size(), _begin);
   _size = rhs.size();
@@ -1353,8 +1353,7 @@ inline void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
   ConstRef z0 = mul_to_ref(result, x0, y0);
   ConstRef z2 = mul_to_ref_nonzero(result.slice(b * 2), x1, y1);
 
-  BigInt z1 = (BigInt{x0} + x1) * (BigInt{y0} + y1) - z0 - z2;
-  add_to(result.slice(b), z1);
+  add_to(result.slice(b), (x0 + x1) * (y0 + y1) - z0 - z2);
 }
 
 inline void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
