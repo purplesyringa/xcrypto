@@ -8,6 +8,7 @@
 #include <immintrin.h>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <stdint.h>
 #include <string_view>
 #include <vector>
@@ -66,6 +67,14 @@
 
 namespace bigint {
 
+void memzero64(uint64_t *data, size_t count) {
+  asm volatile("rep stosq" : "+D"(data), "+c"(count) : "a"(0) : "memory");
+}
+
+void memcpy64(uint64_t *dst, const uint64_t *src, size_t count) {
+  asm volatile("rep movsq" : "+D"(dst), "+S"(src), "+c"(count) : : "memory");
+}
+
 struct with_base {
   uint64_t base;
 };
@@ -82,7 +91,7 @@ class SmallVec {
 
   void increase_capacity_to(size_t new_capacity) {
     uint64_t *new_begin = new uint64_t[new_capacity];
-    std::copy(_begin, _begin + _size, new_begin);
+    memcpy64(new_begin, _begin, _size);
     if (_begin != _inline_storage) {
       delete[] _begin;
     }
@@ -112,7 +121,7 @@ public:
       _begin = new uint64_t[size + 1];
       _capacity = size + 1;
     }
-    std::copy(data, data + size, _begin);
+    memcpy64(_begin, data, size);
     _size = size;
   }
 
@@ -121,7 +130,7 @@ public:
   SmallVec(SmallVec &&rhs) {
     if (rhs._begin == rhs._inline_storage) {
       _begin = _inline_storage;
-      std::copy(rhs._begin, rhs._begin + rhs._size, _begin);
+      memcpy64(_begin, rhs._begin, rhs._size);
     } else {
       _begin = rhs._begin;
     }
@@ -141,7 +150,7 @@ public:
       _begin = _inline_storage;
       _capacity = INLINE_STORAGE_SIZE;
       _size = rhs._size;
-      std::copy(rhs._begin, rhs._begin + rhs._size, _begin);
+      memcpy64(_begin, rhs._begin, rhs._size);
     } else {
       _begin = rhs._begin;
       _size = rhs._size;
@@ -169,7 +178,7 @@ public:
     if (_capacity < new_size) {
       increase_capacity_to(new_size);
     }
-    std::fill(_begin + _size, _begin + new_size, 0);
+    memzero64(_begin + _size, new_size - _size);
     _size = new_size;
   }
   void ensure_size(size_t new_size) {
@@ -326,7 +335,7 @@ SmallVec::SmallVec(ConstSpan rhs) {
     _begin = new uint64_t[rhs.size() + 1];
     _capacity = rhs.size() + 1;
   }
-  std::copy(rhs.data(), rhs.data() + rhs.size(), _begin);
+  memcpy64(_begin, rhs.data(), rhs.size());
   _size = rhs.size();
 }
 
@@ -341,7 +350,7 @@ SmallVec &SmallVec::operator=(ConstSpan rhs) {
     _begin = new uint64_t[rhs.size() + 1];
     _capacity = rhs.size() + 1;
   }
-  std::copy(rhs.data(), rhs.data() + rhs.size(), _begin);
+  memcpy64(_begin, rhs.data(), rhs.size());
   _size = rhs.size();
   return *this;
 }
@@ -554,7 +563,8 @@ inline void add_to(Ref lhs, ConstRef rhs) {
       : "flags", "memory");
 }
 
-inline std::vector<double> cosines{0};
+inline auto cosines = std::make_unique<double[]>(1);
+inline int cosines_n_pow = -1;
 
 // j = -i
 inline __m256d mul_by_j(__m256d vec) {
@@ -865,9 +875,13 @@ inline std::array<uint64_t, 4> reverse_mixed_radix_dyn(int n_pow, uint64_t a,
 
 inline void ensure_twiddle_factors(int want_n_pow) {
   static constexpr double PI = 3.1415926535897931;
-  while (cosines.size() < (size_t{2} << want_n_pow)) {
-    size_t n = cosines.size();
-    cosines.resize(2 * n);
+  while (cosines_n_pow < want_n_pow) {
+    cosines_n_pow++;
+    size_t n = size_t{1} << cosines_n_pow;
+    auto new_cosines = std::make_unique<double[]>(n * 2);
+    memcpy64(reinterpret_cast<uint64_t *>(new_cosines.get()),
+             reinterpret_cast<uint64_t *>(cosines.get()), n);
+    cosines = std::move(new_cosines);
     double coeff = 2 * PI / static_cast<double>(n);
     for (size_t k = 0; k < n / 2; k++) {
       double c = std::cos(coeff * static_cast<double>(k));
@@ -908,7 +922,7 @@ inline BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
 
   // Split numbers into words
   Complex *united_fft = new (std::align_val_t(32)) Complex[n];
-  std::memset(united_fft, 0, sizeof(Complex) * n);
+  memzero64(reinterpret_cast<uint64_t *>(united_fft), 2 * n);
 
   const uint16_t *lhs_data =
       reinterpret_cast<const uint16_t *>(lhs.data.data());
