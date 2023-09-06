@@ -1402,9 +1402,13 @@ inline void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
   // Compute r at other points
   BigInt a0_plus_a2 = a0 + a2;
   BigInt b0_plus_b2 = b0 + b2;
-  BigInt r1 = (a0_plus_a2 + a1) * (b0_plus_b2 + b1);
-  BigInt rm1 = (a0_plus_a2 - a1) * (b0_plus_b2 - b1);
-  BigInt r2 = (a0 + a1 * 2 + a2 * 4) * (b0 + b1 * 2 + b2 * 4);
+  BigInt a0_plus_a1_plus_a2 = a0_plus_a2 + a1;
+  BigInt b0_plus_b1_plus_b2 = b0_plus_b2 + b1;
+  BigInt r1 = a0_plus_a1_plus_a2 * b0_plus_b1_plus_b2;
+  BigInt rm1 = (std::move(a0_plus_a2) - a1) * (std::move(b0_plus_b2) - b1);
+  BigInt r2 = (std::move(a0_plus_a1_plus_a2) + a1 + a2 * 3) *
+              (std::move(b0_plus_b1_plus_b2) + b1 + b2 * 3);
+  BigInt rinf_2 = rinf * 2;
 
   auto half = [](BigInt a) {
     a.halve();
@@ -1417,9 +1421,10 @@ inline void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
 
   // Compute other c's in separate memory because they would otherwise override
   // c4
-  BigInt c1 = r1 + rinf * 2 - third(half(r0 * 3 + r2) + rm1);
-  BigInt c2 = half(r1 + rm1) - rinf - r0;
-  BigInt c3 = half(r0 + third(r2 - rm1) - r1) - rinf * 2;
+  BigInt a = third(half(r0 * 3 + r2) + rm1);
+  BigInt c3 = half(third(std::move(r2) - rm1) + r0 - r1) - rinf_2;
+  BigInt c1 = std::move(rinf_2) + r1 - a;
+  BigInt c2 = half(std::move(r1) + rm1) - rinf - r0;
 
   add_to(result.slice(b), c1);
   add_to(result.slice(b * 2), c2);
