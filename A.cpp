@@ -389,10 +389,13 @@ public:
   BigInt &operator--();
   BigInt operator--(int);
 
-  BigInt &operator*=(uint64_t rhs);
+  uint32_t divmod_inplace(uint32_t rhs);
+  void divide_inplace_whole(uint64_t rhs);
 
   void _normalize();
   void _normalize_nonzero();
+
+  bool halve();
 
   friend class ConstRef;
 };
@@ -490,7 +493,21 @@ void BigInt::_normalize_nonzero() {
   }
 }
 
-inline void add_at_no_resize(Ref lhs, ConstRef rhs) {
+bool BigInt::halve() {
+  // Hours wasted trying to optimize this with SIMD or inline assembly: 8
+  bool carry = false;
+  for (size_t i = data.size(); i > 0; i--) {
+    uint64_t word = data[i - 1];
+    data[i - 1] = (word >> 1) | (uint64_t{carry} << 63);
+    carry = word & 1;
+  }
+  if (!data.empty() && data.back() == 0) {
+    data.pop_back();
+  }
+  return carry;
+}
+
+inline void add_to(Ref lhs, ConstRef rhs) {
   if (__builtin_expect(rhs.data.empty(), 0)) {
     return;
   }
@@ -1213,27 +1230,94 @@ BigInt BigInt::operator--(int) {
 BigInt operator+(BigInt lhs, ConstRef rhs) { return lhs += rhs; }
 BigInt operator-(BigInt lhs, ConstRef rhs) { return lhs -= rhs; }
 
-BigInt &BigInt::operator*=(uint64_t rhs) {
+BigInt &operator*=(BigInt &lhs, uint64_t rhs) {
   if (rhs == 0) {
-    data.clear_dealloc();
-    return *this;
+    lhs.data.clear_dealloc();
+    return lhs;
   }
   uint64_t carry = 0;
-  for (size_t i = 0; i < data.size(); i++) {
-    __uint128_t total = __uint128_t{data[i]} * rhs + carry;
-    data[i] = static_cast<uint64_t>(total);
+  for (size_t i = 0; i < lhs.data.size(); i++) {
+    __uint128_t total = __uint128_t{lhs.data[i]} * rhs + carry;
+    lhs.data[i] = static_cast<uint64_t>(total);
     carry = static_cast<uint64_t>(total >> 64);
   }
   if (carry != 0) {
-    data.push_back(carry);
+    lhs.data.push_back(carry);
   }
-  return *this;
+  return lhs;
+}
+
+uint32_t BigInt::divmod_inplace(uint32_t rhs) {
+  uint32_t *lhs_data = reinterpret_cast<uint32_t *>(data.data());
+  size_t lhs_size = data.size() * 2;
+
+  uint32_t remainder = 0;
+  for (size_t i = lhs_size; i > 0; i--) {
+    uint64_t cur = lhs_data[i - 1] | (uint64_t{remainder} << 32);
+    lhs_data[i - 1] = cur / rhs;
+    remainder = cur % rhs;
+  }
+  _normalize();
+  return remainder;
+}
+
+// Credits to https://stackoverflow.com/a/35780435
+inline constexpr uint64_t inv_2_64(uint64_t x) {
+  assert(x % 2 == 1);
+  uint64_t r = x;
+  for (int i = 0; i < 5; i++) {
+    r = r * (2 - r * x);
+  }
+  assert(r * x == 1);
+  return r;
+}
+
+void BigInt::divide_inplace_whole(uint64_t rhs) {
+  uint64_t inv = inv_2_64(rhs);
+  uint64_t borrow = 0;
+  for (size_t i = 0; i < data.size(); i++) {
+    uint64_t input_word = data[i];
+    uint64_t word = input_word - borrow;
+    borrow = word > input_word;
+    uint64_t res_word = word * inv;
+    data[i] = res_word;
+    borrow += __uint128_t{res_word} * rhs >> 64;
+  }
+  assert(borrow == 0);
+  _normalize();
+}
+
+BigInt &operator/=(BigInt &lhs, uint32_t rhs) {
+  lhs.divmod_inplace(rhs);
+  return lhs;
 }
 
 BigInt operator*(BigInt lhs, uint64_t rhs) { return lhs *= rhs; }
+BigInt operator/(BigInt lhs, uint32_t rhs) { return lhs /= rhs; }
 
 BigInt operator*(ConstRef lhs, ConstRef rhs);
 inline void mul_to(Ref result, ConstRef lhs, ConstRef rhs);
+
+inline ConstRef mul_to_ref(Ref result, ConstRef lhs, ConstRef rhs) {
+  mul_to(result, lhs, rhs);
+  size_t len = 0;
+  if (!lhs.data.empty() && !rhs.data.empty()) {
+    len = lhs.data.size() + rhs.data.size() - 1;
+    if (result.data[len] != 0) {
+      len++;
+    }
+  }
+  return result.slice(0, len);
+}
+
+inline ConstRef mul_to_ref_nonzero(Ref result, ConstRef lhs, ConstRef rhs) {
+  mul_to(result, lhs, rhs);
+  size_t len = lhs.data.size() + rhs.data.size() - 1;
+  if (result.data[len] != 0) {
+    len++;
+  }
+  return result.slice(0, len);
+}
 
 inline void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   __uint128_t product = __uint128_t{lhs.data[0]} * rhs.data[0];
@@ -1312,25 +1396,81 @@ inline void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
   ConstRef y0 = rhs.slice(0, b).normalized();
   ConstRef y1 = rhs.slice(b);
 
-  mul_to(result, x0, y0);
-  size_t z0_len = 0;
-  if (!x0.data.empty() && !y0.data.empty()) {
-    z0_len = x0.data.size() + y0.data.size() - 1;
-    if (result.data[z0_len] != 0) {
-      z0_len++;
-    }
-  }
-  ConstRef z0 = result.slice(0, z0_len);
-
-  mul_to(result.slice(b * 2), x1, y1);
-  size_t z2_len = x1.data.size() + y1.data.size() - 1;
-  if (result.data[b * 2 + z2_len] != 0) {
-    z2_len++;
-  }
-  ConstRef z2 = result.slice(b * 2, z2_len);
+  ConstRef z0 = mul_to_ref(result, x0, y0);
+  ConstRef z2 = mul_to_ref_nonzero(result.slice(b * 2), x1, y1);
 
   BigInt z1 = (BigInt{x0} + x1) * (BigInt{y0} + y1) - z0 - z2;
-  add_at_no_resize(result.slice(b), z1);
+  add_to(result.slice(b), z1);
+}
+
+inline void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
+  // Split lhs and rhs into
+  //   lhs: p(x) = a0 + a1 x + a2 x^2
+  //   rhs: q(x) = b0 + b1 x + b2 x^2
+  // choosing a size such that we necessarily have a2 > a1, b2 > b1
+  size_t b = std::min(lhs.data.size(), rhs.data.size()) / 3 - 1;
+  assert(b * 2 <= lhs.data.size());
+  assert(b * 2 <= rhs.data.size());
+
+  ConstRef a0 = lhs.slice(0, b).normalized();
+  ConstRef a1 = lhs.slice(b, b).normalized();
+  ConstRef a2 = lhs.slice(b * 2);
+  ConstRef b0 = rhs.slice(0, b).normalized();
+  ConstRef b1 = rhs.slice(b, b).normalized();
+  ConstRef b2 = rhs.slice(b * 2);
+
+  // The algorithm works as follows
+  // We compute r(x) = p(x) q(x) at points
+  //   r(0) = a0 b0
+  //   r(1) = (a0 + a1 + a2) (b0 + b1 + b2)
+  //   r(-1) = (a0 - a1 + a2) (b0 - b1 + b2)
+  //   r(2) = (a0 + 2 a1 + 4 a2) (b0 + 2 b1 + 4 b2)
+  //   r(inf) = a2 b2
+  // We then substitute r(x) = c0 + c1 x + c2 x^2 + c3 x^3 + c4 x^4
+  //   ( r(0) ) = (1  0  0  0  0) (с0)
+  //   ( r(1) ) = (1  1  1  1  1) (с1)
+  //   (r(-1) ) = (1 -1  1 -1  1) (с2)
+  //   ( r(2) ) = (1  2  4  8 16) (с3)
+  //   (r(inf)) = (0  0  0  0  1) (с4)
+  // Therefore
+  //   (c0)   ( 1    0    0    0    0) ( r(0) )
+  //   (c1)   (-1/2  1   -1/3 -1/6  2) ( r(1) )
+  //   (c2) = (-1    1/2  1/2  0   -1) (r(-1) )
+  //   (c3)   ( 1/2 -1/2 -1/6  1/6 -2) ( r(2) )
+  //   (c4)   ( 0    0    0    0    1) (r(inf))
+
+  // We compute c0 = r(0) and c4 = r(inf) directly into their respective
+  // locations
+  ConstRef c0 = mul_to_ref(result, a0, b0);
+  ConstRef c4 = mul_to_ref(result.slice(b * 4), a2, b2);
+  ConstRef r0 = c0;
+  ConstRef rinf = c4;
+
+  // Compute r at other points
+  BigInt a0_plus_a2 = a0 + a2;
+  BigInt b0_plus_b2 = b0 + b2;
+  BigInt r1 = (a0_plus_a2 + a1) * (b0_plus_b2 + b1);
+  BigInt rm1 = (a0_plus_a2 - a1) * (b0_plus_b2 - b1);
+  BigInt r2 = (a0 + a1 * 2 + a2 * 4) * (b0 + b1 * 2 + b2 * 4);
+
+  auto half = [](BigInt a) {
+    a.halve();
+    return a;
+  };
+  auto third = [](BigInt a) {
+    a.divide_inplace_whole(3);
+    return a;
+  };
+
+  // Compute other c's in separate memory because they would otherwise override
+  // c4
+  BigInt c1 = r1 + rinf * 2 - third(half(r0 * 3 + r2) + rm1);
+  BigInt c2 = half(r1 + rm1) - rinf - r0;
+  BigInt c3 = half(r0 + third(r2 - rm1) - r1) - rinf * 2;
+
+  add_to(result.slice(b), c1);
+  add_to(result.slice(b * 2), c2);
+  add_to(result.slice(b * 3), c3);
 }
 
 inline void mul_disproportional(Ref result, ConstRef lhs, ConstRef rhs) {
@@ -1338,10 +1478,9 @@ inline void mul_disproportional(Ref result, ConstRef lhs, ConstRef rhs) {
   mul_to(result, lhs, rhs.slice(0, lhs.data.size()).normalized());
   size_t i = lhs.data.size();
   for (; i + lhs.data.size() < rhs.data.size(); i += lhs.data.size()) {
-    add_at_no_resize(result.slice(i),
-                     lhs * rhs.slice(i, lhs.data.size()).normalized());
+    add_to(result.slice(i), lhs * rhs.slice(i, lhs.data.size()).normalized());
   }
-  add_at_no_resize(result.slice(i), lhs * rhs.slice(i));
+  add_to(result.slice(i), lhs * rhs.slice(i));
 }
 
 inline void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
@@ -1360,6 +1499,8 @@ inline void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
       mul_disproportional(result, lhs, rhs);
     } else if (rhs.data.size() * 2 < lhs.data.size()) {
       mul_disproportional(result, rhs, lhs);
+    } else if (std::min(lhs.data.size(), rhs.data.size()) >= 600) {
+      mul_toom33(result, lhs, rhs);
     } else {
       mul_karatsuba(result, lhs, rhs);
     }
@@ -1372,10 +1513,10 @@ BigInt operator*(ConstRef lhs, ConstRef rhs) {
   if (lhs.data.empty() || rhs.data.empty()) {
     return {};
   }
-  int n_pow = get_fft_n_pow(lhs, rhs);
-  if (n_pow >= FFT_CUTOFF) {
-    return mul_fft(lhs, rhs);
-  }
+  // int n_pow = get_fft_n_pow(lhs, rhs);
+  // if (n_pow >= FFT_CUTOFF) {
+  //   return mul_fft(lhs, rhs);
+  // }
   BigInt result;
   result.data.increase_size_zerofill(lhs.data.size() + rhs.data.size());
   mul_to(result, lhs, rhs);
@@ -1500,23 +1641,37 @@ int main() {
   std::srand(1);
 
   std::string s;
-  for (int i = 0; i < 1200000; i++) {
-    s.push_back(static_cast<char>('0' + rand() % 2));
+  for (int i = 0; i < 10000000; i++) {
+    s.push_back(static_cast<char>('0' + rand() % 10));
   }
 
   // mpz_class a(s);
   // mpz_class b = a;
-  // clock_t start = clock();
+  clock_t start = clock();
   Int a = {s.c_str(), bigint::with_base{10}};
 
-  // std::cerr << a.data.size() << std::endl;
+  // while (true) {
+  //   Int b = a;
+  //   if (b.divmod_inplace(3) == 0) {
+  //     break;
+  //   }
+  //   a++;
+  // }
 
-  clock_t start = clock();
-  for (int i = 0; i < 100; i++) {
-    // (mpz_class)(a * b);
-    (a * a);
-    // ((a * a) * (a * a)) * ((a * a) * (a * a));
-  }
+  std::cerr << a.data.size() << std::endl;
+
+  // clock_t start = clock();
+  // for (int i = 0; i < 10000; i++) {
+  // (mpz_class)(a * b);
+  // (a * a);
+  // ((a * a) * (a * a)) * ((a * a) * (a * a));
+  // Int b = a;
+  // b.halve();
+  // b.divide_inplace_whole(3);
+  // c.divmod_inplace(3);
+  // std::cerr << b << std::endl;
+  // return 0;
+  // }
   std::cerr << static_cast<double>(clock() - start) / CLOCKS_PER_SEC
             << std::endl;
 
