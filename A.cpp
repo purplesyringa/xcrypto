@@ -13,58 +13,6 @@
 #include <string_view>
 #include <vector>
 
-// namespace libdivide {
-
-// class divisor {
-//   uint64_t magic;
-//   uint8_t more;
-
-// public:
-//   divisor() {}
-
-//   divisor(uint64_t d) {
-//     uint8_t floor_log_2_d = 63 - __builtin_clzll(d);
-//     // Power of 2
-//     if ((d & (d - 1)) == 0) {
-//       magic = 0;
-//       more = floor_log_2_d;
-//     } else {
-//       uint64_t proposed_m, rem;
-//       asm("divq %[v]"
-//           : "=a"(proposed_m), "=d"(rem)
-//           : [v] "r"(d), "a"(0), "d"((uint64_t)1 << floor_log_2_d)
-//           : "flags");
-//       uint64_t e = d - rem;
-//       if (e < ((uint64_t)1 << floor_log_2_d)) {
-//         more = floor_log_2_d;
-//       } else {
-//         proposed_m += proposed_m;
-//         uint64_t twice_rem = rem + rem;
-//         if (twice_rem >= d || twice_rem < rem)
-//           proposed_m++;
-//         more = floor_log_2_d | 0x80;
-//       }
-//       magic = 1 + proposed_m;
-//     }
-//   }
-
-//   friend uint64_t operator/(uint64_t numer, const divisor &denom) {
-//     uint8_t more = denom.more;
-//     if (denom.magic == 0) {
-//       return numer >> more;
-//     }
-//     uint64_t q = ((__uint128_t)denom.magic * numer) >> 64;
-//     if (more & 0x80) {
-//       uint64_t t = ((numer - q) >> 1) + q;
-//       return t >> (more & 0x7f);
-//     } else {
-//       return q >> more;
-//     }
-//   }
-// };
-
-// } // namespace libdivide
-
 namespace bigint {
 
 static void memzero64(uint64_t *data, size_t count) {
