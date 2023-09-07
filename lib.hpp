@@ -691,7 +691,8 @@ static constexpr std::pair<int, int> get_counts(int n_pow) {
   return {count3, count2};
 }
 
-__attribute__((always_inline)) static inline __m256i shiftl(__m256i x, int shift) {
+__attribute__((always_inline)) static inline __m256i shiftl(__m256i x,
+                                                            int shift) {
   if (shift > 0) {
     return _mm256_slli_epi32(x, shift);
   } else {
@@ -699,12 +700,33 @@ __attribute__((always_inline)) static inline __m256i shiftl(__m256i x, int shift
   }
 }
 
-#ifndef __clang__
+// On Clang, we can explicitly request a calling convetion that doesn't affect
+// general-purpose registers. On gcc, we have to resort to various hacks that
+// ensure that GPRs are not used
+#ifdef __clang__
+template <uint32_t N>
+__attribute__((always_inline)) static inline __m256i set1_epi32() {
+  return _mm256_set1_epi32(N);
+}
+#else
+// Stop gcc from unnecessarily moving data to and from GPRs
 #pragma GCC push_options
 #pragma GCC optimize("O2")
+
+// By making the variable global and mutable, we prevent gcc from inferring
+// that it can use a broadcast instruction so that it does not clobber
+// general-purpose registers
+template <uint32_t N>
+alignas(32) uint32_t set1_epi32_data[] = {N, N, N, N, N, N, N, N};
+template <uint32_t N>
+__attribute__((always_inline)) static inline __m256i set1_epi32() {
+  return _mm256_load_si256(
+      reinterpret_cast<const __m256i *>(set1_epi32_data<N>));
+}
 #endif
+
 template <int N_POW, int... Iterator3, int... Iterator2>
-__attribute__((always_inline, sysv_abi)) static inline __m256i
+__attribute__((always_inline)) static inline __m256i
 reverse_mixed_radix_const256_impl(__m256i number,
                                   std::integer_sequence<int, Iterator3...>,
                                   std::integer_sequence<int, Iterator2...>) {
@@ -726,15 +748,15 @@ reverse_mixed_radix_const256_impl(__m256i number,
   __m256i result = _mm256_setzero_si256();
   ((result = _mm256_or_si256(
         result,
-        shiftl(_mm256_and_si256(
-                   number, _mm256_set1_epi32(uint32_t{7} << (Iterator3 * 3))),
+        shiftl(_mm256_and_si256(number,
+                                set1_epi32<uint32_t{7} << (Iterator3 * 3)>()),
                N_POW - (Iterator3 * 2 + 1) * 3))),
    ...);
   ((result = _mm256_or_si256(
         result,
         shiftl(_mm256_and_si256(
-                   number, _mm256_set1_epi32(uint32_t{3}
-                                             << (COUNT3 * 3 + Iterator2 * 2))),
+                   number,
+                   set1_epi32<uint32_t{3} << (COUNT3 * 3 + Iterator2 * 2)>()),
                N_POW - COUNT3 * 3 * 2 - (Iterator2 * 2 + 1) * 2))),
    ...);
   // Restore the state of the registers. Prevent reordering of `asm volatile`
@@ -746,7 +768,14 @@ reverse_mixed_radix_const256_impl(__m256i number,
   return result;
 }
 template <int N_POW>
-__attribute__((sysv_abi)) static __m256i
+#ifdef __clang__
+// Explicitly request that no GPRs but r11 are used
+__attribute__((preserve_most))
+#else
+// Prevent register overriding on Windows
+__attribute__((sysv_abi))
+#endif
+static __m256i
 reverse_mixed_radix_const256(__m256i number) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
   static constexpr int COUNT2 = get_counts(N_POW).second;
@@ -762,19 +791,30 @@ template <int... Pows>
 __attribute__((sysv_abi)) static __m256i
 reverse_mixed_radix_dyn(int n_pow, __m256i vec,
                         std::integer_sequence<int, Pows...>) {
-  static constexpr __m256i(__attribute__((sysv_abi)) * dispatch[])(__m256i) = {
-      &reverse_mixed_radix_const256<FFT_MIN + Pows>...};
+  static constexpr __m256i(
+#ifdef __clang__
+      __attribute__((preserve_most))
+#else
+      __attribute__((sysv_abi))
+#endif
+      *
+      dispatch[])(__m256i) = {&reverse_mixed_radix_const256<FFT_MIN + Pows>...};
   register __m256i ymm0 asm("ymm0") = vec;
   asm volatile("call *%[addr];"
                : "+x"(ymm0)
                : [addr] "m"(dispatch[n_pow - FFT_MIN])
                : "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm13",
-                 "ymm14", "ymm15");
+                 "ymm14", "ymm15",
+#ifdef __clang__
+                 "r11"
+#endif
+  );
   return ymm0;
 }
 static uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
   auto res = reverse_mixed_radix_dyn(
-      n_pow, _mm256_castsi128_si256(_mm_cvtsi32_si128(static_cast<int>(number))),
+      n_pow,
+      _mm256_castsi128_si256(_mm_cvtsi32_si128(static_cast<int>(number))),
       std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
   return static_cast<uint32_t>(_mm256_cvtsi256_si32(res));
 }
@@ -836,8 +876,9 @@ static auto fft_cooley_tukey(Complex *data, int n_pow) {
   ensure_twiddle_factors(n_pow);
   int count3 = get_counts(n_pow).first;
   fft_cooley_tukey_no_transpose_8(data, n_pow, count3);
-  return
-      [n_pow](auto... args) { return reverse_mixed_radix_dyn(n_pow, static_cast<uint32_t>(args)...); };
+  return [n_pow](auto... args) {
+    return reverse_mixed_radix_dyn(n_pow, static_cast<uint32_t>(args)...);
+  };
 }
 
 // Credits to https://stackoverflow.com/a/41148578
