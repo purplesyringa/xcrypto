@@ -743,36 +743,14 @@ inline constexpr std::pair<int, int> get_counts(int n_pow) {
   return {count3, count2};
 }
 
-inline uint64_t shiftl(uint64_t x, int shift) {
-  if (shift > 0) {
-    return x << shift;
-  } else {
-    return x >> (-shift);
-  }
-}
 __attribute__((always_inline)) inline __m256i shiftl(__m256i x, int shift) {
   if (shift > 0) {
-    return _mm256_slli_epi64(x, shift);
+    return _mm256_slli_epi32(x, shift);
   } else {
-    return _mm256_srli_epi64(x, -shift);
+    return _mm256_srli_epi32(x, -shift);
   }
 }
 
-template <int N_POW>
-inline uint64_t reverse_mixed_radix_const64(uint64_t number) {
-  static constexpr int COUNT3 = get_counts(N_POW).first;
-  static constexpr int COUNT2 = get_counts(N_POW).second;
-  uint64_t result = 0;
-  for (int i = 0; i < COUNT3; i++) {
-    result |=
-        shiftl(number & (uint64_t{7} << (i * 3)), N_POW - (i * 2 + 1) * 3);
-  }
-  for (int i = 0; i < COUNT2; i++) {
-    result |= shiftl(number & (uint64_t{3} << (COUNT3 * 3 + i * 2)),
-                     N_POW - COUNT3 * 3 * 2 - (i * 2 + 1) * 2);
-  }
-  return result;
-}
 #ifndef __clang__
 #pragma GCC push_options
 #pragma GCC optimize("O2")
@@ -801,14 +779,14 @@ reverse_mixed_radix_const256_impl(__m256i number,
   ((result = _mm256_or_si256(
         result,
         shiftl(_mm256_and_si256(
-                   number, _mm256_set1_epi64x(uint64_t{7} << (Iterator3 * 3))),
+                   number, _mm256_set1_epi32(uint32_t{7} << (Iterator3 * 3))),
                N_POW - (Iterator3 * 2 + 1) * 3))),
    ...);
   ((result = _mm256_or_si256(
         result,
         shiftl(_mm256_and_si256(
-                   number, _mm256_set1_epi64x(uint64_t{3}
-                                              << (COUNT3 * 3 + Iterator2 * 2))),
+                   number, _mm256_set1_epi32(uint32_t{3}
+                                             << (COUNT3 * 3 + Iterator2 * 2))),
                N_POW - COUNT3 * 3 * 2 - (Iterator2 * 2 + 1) * 2))),
    ...);
   // Restore the state of the registers. Prevent reordering of `asm volatile`
@@ -833,13 +811,6 @@ reverse_mixed_radix_const256(__m256i number) {
 #endif
 
 template <int... Pows>
-inline uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number,
-                                        std::integer_sequence<int, Pows...>) {
-  static constexpr uint64_t (*dispatch[])(uint64_t) = {
-      &reverse_mixed_radix_const64<FFT_MIN + Pows>...};
-  return dispatch[n_pow - FFT_MIN](number);
-}
-template <int... Pows>
 __attribute__((sysv_abi)) inline __m256i
 reverse_mixed_radix_dyn(int n_pow, __m256i vec,
                         std::integer_sequence<int, Pows...>) {
@@ -853,24 +824,46 @@ reverse_mixed_radix_dyn(int n_pow, __m256i vec,
                  "ymm14", "ymm15");
   return ymm0;
 }
-
-inline uint64_t reverse_mixed_radix_dyn(int n_pow, uint64_t number) {
-  return reverse_mixed_radix_dyn(
-      n_pow, number, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+inline uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
+  auto res = reverse_mixed_radix_dyn(
+      n_pow, _mm256_castsi128_si256(_mm_cvtsi32_si128(static_cast<int>(number))),
+      std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+  return static_cast<uint32_t>(_mm256_cvtsi256_si32(res));
 }
-inline std::array<uint64_t, 4> reverse_mixed_radix_dyn(int n_pow, uint64_t a,
-                                                       uint64_t b, uint64_t c,
-                                                       uint64_t d) {
-  // This should be autovectorized
+inline std::array<uint32_t, 8> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
+                                                       uint32_t b, uint32_t c,
+                                                       uint32_t d, uint32_t e,
+                                                       uint32_t f, uint32_t g,
+                                                       uint32_t h) {
   auto res = reverse_mixed_radix_dyn(
       n_pow,
-      _mm256_set_epi64x(static_cast<int64_t>(d), static_cast<int64_t>(c),
-                        static_cast<int64_t>(b), static_cast<int64_t>(a)),
+      _mm256_set_epi32(static_cast<int>(h), static_cast<int>(g),
+                       static_cast<int>(f), static_cast<int>(e),
+                       static_cast<int>(d), static_cast<int>(c),
+                       static_cast<int>(b), static_cast<int>(a)),
       std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
-  return {static_cast<uint64_t>(_mm256_extract_epi64(res, 0)),
-          static_cast<uint64_t>(_mm256_extract_epi64(res, 1)),
-          static_cast<uint64_t>(_mm256_extract_epi64(res, 2)),
-          static_cast<uint64_t>(_mm256_extract_epi64(res, 3))};
+  return {static_cast<uint32_t>(_mm256_extract_epi32(res, 0)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 1)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 2)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 3)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 4)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 5)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 6)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 7))};
+}
+inline std::array<uint32_t, 4> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
+                                                       uint32_t b, uint32_t c,
+                                                       uint32_t d) {
+  auto res = reverse_mixed_radix_dyn(
+      n_pow,
+      _mm256_castsi128_si256(
+          _mm_set_epi32(static_cast<int>(d), static_cast<int>(c),
+                        static_cast<int>(b), static_cast<int>(a))),
+      std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+  return {static_cast<uint32_t>(_mm256_extract_epi32(res, 0)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 1)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 2)),
+          static_cast<uint32_t>(_mm256_extract_epi32(res, 3))};
 }
 
 inline void ensure_twiddle_factors(int want_n_pow) {
@@ -896,7 +889,7 @@ inline auto fft_cooley_tukey(Complex *data, int n_pow) {
   int count3 = get_counts(n_pow).first;
   fft_cooley_tukey_no_transpose_8(data, n_pow, count3);
   return
-      [n_pow](auto... args) { return reverse_mixed_radix_dyn(n_pow, args...); };
+      [n_pow](auto... args) { return reverse_mixed_radix_dyn(n_pow, static_cast<uint32_t>(args)...); };
 }
 
 // Credits to https://stackoverflow.com/a/41148578
@@ -941,7 +934,7 @@ inline BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // Disentangle real and imaginary values into values of lhs & rhs at roots
   // of unity, and then compute FFT of the product as pointwise product of
   // values of lhs and rhs at roots of unity
-  size_t united_fft_one = united_fft_access(uint64_t{1});
+  size_t united_fft_one = united_fft_access(1);
   auto get_long_fft_times4 = [&](size_t ai, size_t ai4, size_t ani0,
                                  size_t ani1, size_t ani04, size_t ani14) {
     __builtin_prefetch(united_fft[ai4]);
@@ -973,10 +966,9 @@ inline BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
     size_t ni1b = n / 2 - i - 1;
     auto [aia, aia4, aib, aib4] =
         united_fft_access(i, i + 4, n / 2 + i, n / 2 + i + 4);
-    auto [ani0a, ani1a, ani0a4, ani1a4] =
-        united_fft_access(ni0a, ni1a, ni0a - 4, ni1a - 4);
-    auto [ani0b, ani1b, ani0b4, ani1b4] =
-        united_fft_access(ni0b, ni1b, ni0b - 4, ni1b - 4);
+    auto [ani0a, ani1a, ani0a4, ani1a4, ani0b, ani1b, ani0b4, ani1b4] =
+        united_fft_access(ni0a, ni1a, ni0a - 4, ni1a - 4, ni0b, ni1b, ni0b - 4,
+                          ni1b - 4);
     __builtin_prefetch(&cosines[n + n / 4 + i + 6]);
     __builtin_prefetch(&cosines[n + i + 6]);
     __m256d a = get_long_fft_times4(aia, aia4, ani0a, ani1a, ani0a4, ani1a4);
@@ -1222,7 +1214,7 @@ uint32_t BigInt::divmod_inplace(uint32_t rhs) {
   uint32_t remainder = 0;
   for (size_t i = lhs_size; i > 0; i--) {
     uint64_t cur = lhs_data[i - 1] | (uint64_t{remainder} << 32);
-    lhs_data[i - 1] = cur / rhs;
+    lhs_data[i - 1] = static_cast<uint32_t>(cur / rhs);
     remainder = cur % rhs;
   }
   _normalize();
