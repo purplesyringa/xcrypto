@@ -775,13 +775,15 @@ __attribute__((preserve_most))
 // Prevent register overriding on Windows
 __attribute__((sysv_abi))
 #endif
-static __m256i
-reverse_mixed_radix_const256(__m256i number) {
+static void
+reverse_mixed_radix_const256(void *ret, __m256i number) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
   static constexpr int COUNT2 = get_counts(N_POW).second;
-  return reverse_mixed_radix_const256_impl<N_POW>(
+  register __m256i res asm("ymm0") = reverse_mixed_radix_const256_impl<N_POW>(
       number, std::make_integer_sequence<int, COUNT3>(),
       std::make_integer_sequence<int, COUNT2>());
+  asm volatile("jmp *%[ret];" : : [ret] "r"(ret), "r"(res) : "memory");
+  __builtin_unreachable();
 }
 #ifndef __clang__
 #pragma GCC pop_options
@@ -791,20 +793,22 @@ template <int... Pows>
 __attribute__((sysv_abi)) static __m256i
 reverse_mixed_radix_dyn(int n_pow, __m256i vec,
                         std::integer_sequence<int, Pows...>) {
-  static constexpr __m256i(
+  static constexpr void(
 #ifdef __clang__
       __attribute__((preserve_most))
 #else
       __attribute__((sysv_abi))
 #endif
-      *
-      dispatch[])(__m256i) = {&reverse_mixed_radix_const256<FFT_MIN + Pows>...};
+      * dispatch[])(void *, __m256i) = {
+      &reverse_mixed_radix_const256<FFT_MIN + Pows>...};
   register __m256i ymm0 asm("ymm0") = vec;
-  asm volatile("call *%[addr];"
+  asm volatile("lea 1f(%%rip), %%rdi;"
+               "jmp *%[addr];"
+               "1:"
                : "+x"(ymm0)
                : [addr] "m"(dispatch[n_pow - FFT_MIN])
                : "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm13",
-                 "ymm14", "ymm15",
+                 "ymm14", "ymm15", "rdi",
 #ifdef __clang__
                  "r11"
 #endif
