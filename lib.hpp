@@ -786,7 +786,7 @@ static void ensure_twiddle_factors(int want_n_pow) {
   while (cosines_n_pow < want_n_pow) {
     cosines_n_pow++;
     size_t n = size_t{1} << cosines_n_pow;
-    auto new_cosines = std::make_unique<double[]>(n * 2);
+    std::unique_ptr<double[]> new_cosines{new double[n * 2]};
     memcpy64(reinterpret_cast<uint64_t *>(new_cosines.get()),
              reinterpret_cast<uint64_t *>(cosines.get()), n);
     cosines = std::move(new_cosines);
