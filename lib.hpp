@@ -700,120 +700,43 @@ __attribute__((always_inline)) static inline __m256i shiftl(__m256i x,
   }
 }
 
-// On Clang, we can explicitly request a calling convetion that doesn't affect
-// general-purpose registers. On gcc, we have to resort to various hacks that
-// ensure that GPRs are not used
-#ifdef __clang__
-template <uint32_t N>
-__attribute__((always_inline)) static inline __m256i set1_epi32() {
-  return _mm256_set1_epi32(N);
-}
-#else
-// Stop gcc from unnecessarily moving data to and from GPRs
-#pragma GCC push_options
-#pragma GCC optimize("O2")
-
-// By making the variable global and mutable, we prevent gcc from inferring
-// that it can use a broadcast instruction so that it does not clobber
-// general-purpose registers
-template <uint32_t N>
-alignas(32) uint32_t set1_epi32_data[] = {N, N, N, N, N, N, N, N};
-template <uint32_t N>
-__attribute__((always_inline)) static inline __m256i set1_epi32() {
-  return _mm256_load_si256(
-      reinterpret_cast<const __m256i *>(set1_epi32_data<N>));
-}
-#endif
-
 template <int N_POW, int... Iterator3, int... Iterator2>
 __attribute__((always_inline)) static inline __m256i
 reverse_mixed_radix_const256_impl(__m256i number,
                                   std::integer_sequence<int, Iterator3...>,
                                   std::integer_sequence<int, Iterator2...>) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
-  // Trick the compiler into believing the state of ymm{1..7} has to be
-  // preserved during the function execution so that we are free to remove
-  // these registers from clobber list when dynamically calling this function
-  register __m256d ymm1 asm("ymm1");
-  register __m256d ymm2 asm("ymm2");
-  register __m256d ymm3 asm("ymm3");
-  register __m256d ymm4 asm("ymm4");
-  register __m256d ymm5 asm("ymm5");
-  register __m256d ymm6 asm("ymm6");
-  register __m256d ymm7 asm("ymm7");
-  // Save the state of the registers at the beginning of the function
-  asm volatile(""
-               : "=x"(ymm1), "=x"(ymm2), "=x"(ymm3), "=x"(ymm4), "=x"(ymm5),
-                 "=x"(ymm6), "=x"(ymm7));
   __m256i result = _mm256_setzero_si256();
   ((result = _mm256_or_si256(
         result,
-        shiftl(_mm256_and_si256(number,
-                                set1_epi32<uint32_t{7} << (Iterator3 * 3)>()),
+        shiftl(_mm256_and_si256(
+                   number, _mm256_set1_epi32(uint32_t{7} << (Iterator3 * 3))),
                N_POW - (Iterator3 * 2 + 1) * 3))),
    ...);
   ((result = _mm256_or_si256(
         result,
         shiftl(_mm256_and_si256(
-                   number,
-                   set1_epi32<uint32_t{3} << (COUNT3 * 3 + Iterator2 * 2)>()),
+                   number, _mm256_set1_epi32(uint32_t{3}
+                                             << (COUNT3 * 3 + Iterator2 * 2))),
                N_POW - COUNT3 * 3 * 2 - (Iterator2 * 2 + 1) * 2))),
    ...);
-  // Restore the state of the registers. Prevent reordering of `asm volatile`
-  // with computation of the result by specifying the latter as an input
-  asm volatile(""
-               :
-               : "x"(result), "x"(ymm1), "x"(ymm2), "x"(ymm3), "x"(ymm4),
-                 "x"(ymm5), "x"(ymm6), "x"(ymm7));
   return result;
 }
 template <int N_POW>
-#ifdef __clang__
-// Explicitly request that no GPRs but r11 are used
-__attribute__((preserve_most))
-#else
-// Prevent register overriding on Windows
-__attribute__((sysv_abi))
-#endif
-static void
-reverse_mixed_radix_const256(void *ret, __m256i number) {
+static __m256i reverse_mixed_radix_const256(__m256i number) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
   static constexpr int COUNT2 = get_counts(N_POW).second;
-  register __m256i res asm("ymm0") = reverse_mixed_radix_const256_impl<N_POW>(
+  return reverse_mixed_radix_const256_impl<N_POW>(
       number, std::make_integer_sequence<int, COUNT3>(),
       std::make_integer_sequence<int, COUNT2>());
-  asm volatile("jmp *%[ret];" : : [ret] "r"(ret), "r"(res) : "memory");
-  __builtin_unreachable();
 }
-#ifndef __clang__
-#pragma GCC pop_options
-#endif
 
 template <int... Pows>
-__attribute__((sysv_abi)) static __m256i
-reverse_mixed_radix_dyn(int n_pow, __m256i vec,
-                        std::integer_sequence<int, Pows...>) {
-  static constexpr void(
-#ifdef __clang__
-      __attribute__((preserve_most))
-#else
-      __attribute__((sysv_abi))
-#endif
-      * dispatch[])(void *, __m256i) = {
+static __m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec,
+                                       std::integer_sequence<int, Pows...>) {
+  static constexpr __m256i (*dispatch[])(__m256i) = {
       &reverse_mixed_radix_const256<FFT_MIN + Pows>...};
-  register __m256i ymm0 asm("ymm0") = vec;
-  asm volatile("lea 1f(%%rip), %%rdi;"
-               "jmp *%[addr];"
-               "1:"
-               : "+x"(ymm0)
-               : [addr] "m"(dispatch[n_pow - FFT_MIN])
-               : "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm13",
-                 "ymm14", "ymm15", "rdi",
-#ifdef __clang__
-                 "r11"
-#endif
-  );
-  return ymm0;
+  return dispatch[n_pow - FFT_MIN](vec);
 }
 static uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
   auto res = reverse_mixed_radix_dyn(
