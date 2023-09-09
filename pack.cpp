@@ -238,8 +238,8 @@ std::pair<std::vector<size_t>, size_t> find_refren(const std::vector<Token>& tok
 }
 
 
-std::string FIRST_CHAR_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-std::string NEXT_CHARS_ALPHABET = FIRST_CHAR_ALPHABET + "0123456789";
+std::string FIRST_CHAR_ALPHABET = "abcdefghijklmnopqrstuvwxyz";
+std::string NEXT_CHARS_ALPHABET = FIRST_CHAR_ALPHABET + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 
 std::string get_id_by_index(size_t index) {
@@ -250,12 +250,13 @@ std::string get_id_by_index(size_t index) {
         length++;
         count_of_this_length *= NEXT_CHARS_ALPHABET.size();
     }
-    std::string s(length, '\0');
+    std::string s(length + 1, '\0');
     for (size_t i = 0; i < length - 1; i++) {
-        s[length - 1 - i] = NEXT_CHARS_ALPHABET[index % NEXT_CHARS_ALPHABET.size()];
+        s[length - i] = NEXT_CHARS_ALPHABET[index % NEXT_CHARS_ALPHABET.size()];
         index /= NEXT_CHARS_ALPHABET.size();
     }
-    s[0] = FIRST_CHAR_ALPHABET[index];
+    s[0] = '_';
+    s[1] = FIRST_CHAR_ALPHABET[index];
     return s;
 }
 
@@ -292,6 +293,7 @@ bool compress_once(
 int main() {
     size_t next_free_id_index;
     std::cin >> next_free_id_index;
+    next_free_id_index = 0;
 
     // Separate code from #include's so that #define's are placed under includes
     std::vector<Token> tokens;
@@ -300,13 +302,7 @@ int main() {
         if (token.kind == TokenKind::PREPROCESSOR && token.text.substr(0, 8) == "#include") {
             prologue_directives.push_back(std::move(token.text));
         } else {
-            // Immediately concat literals
-            if (token.text[0] == '\"' && !tokens.empty() && tokens.back().text[0] == '\"') {
-                auto& text = tokens.back().text;
-                text.insert(text.end() - 1, token.text.begin() + 1, token.text.end() - 1);
-            } else {
-                tokens.push_back(std::move(token));
-            }
+            tokens.push_back(std::move(token));
         }
     }
 

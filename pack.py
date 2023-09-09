@@ -1,7 +1,9 @@
+import ast
 import clang.cindex
 from clang.cindex import Cursor, CursorKind, Token, TokenKind
 from collections import defaultdict
 from dataclasses import dataclass, field
+import re
 import subprocess
 import sys
 from typing import Literal, Optional
@@ -430,15 +432,12 @@ def map_identifier_token(token: Token) -> (str, TokenKind):
     return text
 
 
-PackToken = (TokenKind | Literal["preprocessed"], str)
-
-
-def may_concat_tokens(a: PackToken, b: PackToken) -> bool:
-    if a[0] != TokenKind.PUNCTUATION and b[0] != TokenKind.PUNCTUATION:
+def may_concat_tokens(a: Token, b: Token) -> bool:
+    if a.kind != TokenKind.PUNCTUATION and b.kind != TokenKind.PUNCTUATION:
         return False
-    if a[0] != TokenKind.PUNCTUATION or b[0] != TokenKind.PUNCTUATION:
+    if a.kind != TokenKind.PUNCTUATION or b.kind != TokenKind.PUNCTUATION:
         return True
-    return a[1] + b[1] not in ("++", "+++", "++++", "--", "---", "----")
+    return a.spelling + b.spelling not in ("++", "+++", "++++", "--", "---", "----")
 
 
 def strip_export_attribute(tokens: list[Token]) -> list[Token]:
@@ -460,13 +459,7 @@ def concat_tokens(tokens: list[Token]) -> str:
     last_token = None
     s = ""
     for token in tokens:
-        if (
-            last_token is not None
-            and not may_concat_tokens(
-                (last_token.kind, last_token.spelling),
-                (token.kind, token.spelling)
-            )
-        ):
+        if last_token is not None and not may_concat_tokens(last_token, token):
             s += " "
         s += token.spelling
         last_token = token
@@ -475,10 +468,9 @@ def concat_tokens(tokens: list[Token]) -> str:
 
 last_preprocessor_directive_line = None
 last_preprocessor_directive_tokens = []
+new_tokens = []
 
-print(max_used_new_identifiers)
-
-for token in compress_literals(strip_export_attribute(list(translation_unit.cursor.get_tokens()))):
+for token in strip_export_attribute(list(translation_unit.cursor.get_tokens())):
     if token.kind == TokenKind.COMMENT:
         continue
 
@@ -488,7 +480,7 @@ for token in compress_literals(strip_export_attribute(list(translation_unit.curs
         continue
     elif last_preprocessor_directive_line is not None:
         # The preprocessor directive has just ended
-        print("preprocessor", concat_tokens(last_preprocessor_directive_tokens))
+        new_tokens.append(("preprocessor", concat_tokens(last_preprocessor_directive_tokens)))
         last_preprocessor_directive_line = None
         last_preprocessor_directive_tokens = []
 
@@ -499,10 +491,95 @@ for token in compress_literals(strip_export_attribute(list(translation_unit.curs
         continue
 
     if token.kind == TokenKind.PUNCTUATION:
-        print("punctuation", token.spelling)
+        new_tokens.append(("punctuation", token.spelling))
     elif token.kind == TokenKind.KEYWORD:
-        print("keyword", token.spelling)
+        new_tokens.append(("keyword", token.spelling))
     elif token.kind == TokenKind.IDENTIFIER:
-        print("identifier", map_identifier_token(token))
+        new_tokens.append(("identifier", map_identifier_token(token)))
     elif token.kind == TokenKind.LITERAL:
-        print("literal", token.spelling)
+        if (
+            token.spelling[0] == "\""
+            and new_tokens
+            and new_tokens[-1][0] == "literal"
+            and new_tokens[-1][1][0] == "\""
+        ):
+            new_tokens[-1] = ("literal", new_tokens[-1][1][:-1] + token.spelling[1:])
+        else:
+            new_tokens.append(("literal", token.spelling))
+    else:
+        assert False
+
+
+def replace_asm_named_operand(code: str, name: str, i: int) -> str:
+    return re.sub(r"%(\w*)\[" + re.escape(name) + r"\]", r"%\g<1>" + str(i), code)
+
+
+def compress_asm_statements(tokens: list[(str, str)]) -> list[(str, str)]:
+    state = "none"
+    paren_nesting = 0
+    seen_colon = False
+    code = None
+    code_i = None
+    operand_i = None
+    has_operand_without_comma = False
+
+    result = []
+    buffered_tokens = []
+
+    for i, token in enumerate(tokens):
+        if state == "none":
+            if token == ("keyword", "asm"):
+                state = "inside_asm"
+                paren_nesting = 0
+                seen_colon = False
+                code = None
+                code_i = None
+                operand_i = 0
+                has_operand_without_comma = False
+                buffered_tokens = [token]
+            else:
+                result.append(token)
+        elif state == "inside_asm":
+            if token[0] == "literal" and paren_nesting == 1 and not seen_colon:
+                code_i = len(buffered_tokens)
+                code = token[1].replace(", ", ",")
+            elif token == ("punctuation", ":"):
+                seen_colon = True
+                if has_operand_without_comma:
+                    operand_i += 1
+                has_operand_without_comma = False
+            else:
+                if seen_colon:
+                    has_operand_without_comma = True
+                if token == ("punctuation", "("):
+                    paren_nesting += 1
+                elif token == ("punctuation", ")"):
+                    paren_nesting -= 1
+                    if paren_nesting == 0:
+                        buffered_tokens[code_i] = ("literal", code)
+                        buffered_tokens.append(token)
+                        result += buffered_tokens
+                        state = "none"
+                        continue
+                elif token == ("punctuation", "[") and paren_nesting == 1:
+                    state = "named_operand"
+                    continue
+                elif token == ("punctuation", ",") and paren_nesting == 1:
+                    operand_i += 1
+                    has_operand_without_comma = False
+            buffered_tokens.append(token)
+        elif state == "named_operand":
+            assert token[0] == "identifier"
+            code = replace_asm_named_operand(code, token[1], operand_i)
+            state = "after_named_operand"
+        elif state == "after_named_operand":
+            assert token == ("punctuation", "]")
+            state = "inside_asm"
+
+    assert state == "none"
+    return result
+
+
+print(max_used_new_identifiers)
+for kind, text in compress_asm_statements(new_tokens):
+    print(kind, text)
