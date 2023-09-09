@@ -1,9 +1,10 @@
 import clang.cindex
 from clang.cindex import Cursor, CursorKind, Token, TokenKind
+from collections import defaultdict
 from dataclasses import dataclass, field
 import subprocess
 import sys
-from typing import Optional
+from typing import Literal, Optional
 
 
 # Prevent clang from expanding intrinsics
@@ -283,10 +284,27 @@ for node, scope in unscoped_identifier_uses.values():
         scope = scope.parent
 
 
+FIRST_CHAR_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+NEXT_CHARS_ALPHABET = FIRST_CHAR_ALPHABET + "0123456789"
+
+
+def repeat_next_chars_alphabet(n: int, prefix: str):
+    if n == 0:
+        yield prefix
+    else:
+        for c in NEXT_CHARS_ALPHABET:
+            yield from repeat_next_chars_alphabet(n - 1, prefix + c)
+
+
 def list_new_identifiers():
-    FIRST_CHAR_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    for c in FIRST_CHAR_ALPHABET:
-        yield c
+    n = 0
+    while True:
+        for c in FIRST_CHAR_ALPHABET:
+            yield from repeat_next_chars_alphabet(n, c)
+        n += 1
+
+
+max_used_new_identifiers = 0
 
 
 def rename_in_scope(
@@ -294,6 +312,8 @@ def rename_in_scope(
     inherited_renames: dict[str, str],
     auto_inheritable_identifiers: set[str]
 ):
+    global max_used_new_identifiers
+
     inherited_renames = {
         id: inherited_renames[id]
         for id in auto_inheritable_identifiers | scope.inherited_identifiers
@@ -301,15 +321,19 @@ def rename_in_scope(
     used_renamed_ids = set(inherited_renames.values())
 
     gen = list_new_identifiers()
+    i = 0
     for id in sorted(scope.identifiers):
         if id in scope.preserved_identifiers:
             scope.renames[id] = id
             continue
         renamed_id = next(gen)
+        i += 1
         while renamed_id in used_renamed_ids:
             renamed_id = next(gen)
+            i += 1
         scope.renames[id] = renamed_id
     scope.renames |= inherited_renames
+    max_used_new_identifiers = max(max_used_new_identifiers, i)
 
     for child in scope.children:
         rename_in_scope(
@@ -406,15 +430,18 @@ def map_identifier_token(token: Token) -> (str, TokenKind):
     return text
 
 
-def may_concat_tokens(a: Token, b: Token) -> bool:
-    if a.kind != TokenKind.PUNCTUATION and b.kind != TokenKind.PUNCTUATION:
+PackToken = (TokenKind | Literal["preprocessed"], str)
+
+
+def may_concat_tokens(a: PackToken, b: PackToken) -> bool:
+    if a[0] != TokenKind.PUNCTUATION and b[0] != TokenKind.PUNCTUATION:
         return False
-    if a.kind != TokenKind.PUNCTUATION or b.kind != TokenKind.PUNCTUATION:
+    if a[0] != TokenKind.PUNCTUATION or b[0] != TokenKind.PUNCTUATION:
         return True
-    return a.spelling + b.spelling not in ("++", "+++", "++++", "--", "---", "----")
+    return a[1] + b[1] not in ("++", "+++", "++++", "--", "---", "----")
 
 
-def strip_export_attribute(tokens: list[Token]):
+def strip_export_attribute(tokens: list[Token]) -> list[Token]:
     result = []
     skip = 0
     for token in tokens:
@@ -429,26 +456,53 @@ def strip_export_attribute(tokens: list[Token]):
     return result
 
 
-last_token = None
+def concat_tokens(tokens: list[Token]) -> str:
+    last_token = None
+    s = ""
+    for token in tokens:
+        if (
+            last_token is not None
+            and not may_concat_tokens(
+                (last_token.kind, last_token.spelling),
+                (token.kind, token.spelling)
+            )
+        ):
+            s += " "
+        s += token.spelling
+        last_token = token
+    return s
+
+
 last_preprocessor_directive_line = None
-for token in strip_export_attribute(list(translation_unit.cursor.get_tokens())):
+last_preprocessor_directive_tokens = []
+
+print(max_used_new_identifiers)
+
+for token in compress_literals(strip_export_attribute(list(translation_unit.cursor.get_tokens()))):
     if token.kind == TokenKind.COMMENT:
         continue
-    elif token.kind == TokenKind.PUNCTUATION and token.spelling == "#":
-        last_preprocessor_directive_line = token.extent.start.line
-        if last_token is not None:
-            print()
-    elif last_preprocessor_directive_line is not None and token.extent.start.line > last_preprocessor_directive_line:
-        print()
+
+    if last_preprocessor_directive_line == token.extent.start.line:
+        # We're inside a preprocessor directive
+        last_preprocessor_directive_tokens.append(token)
+        continue
+    elif last_preprocessor_directive_line is not None:
+        # The preprocessor directive has just ended
+        print("preprocessor", concat_tokens(last_preprocessor_directive_tokens))
         last_preprocessor_directive_line = None
-    elif last_token is not None and not may_concat_tokens(last_token, token):
-        print(" ", end="")
+        last_preprocessor_directive_tokens = []
 
-    if token.kind == TokenKind.IDENTIFIER:
-        text = map_identifier_token(token)
-    else:
-        text = token.spelling
-    print(text, end="")
-    last_token = token
+    if token.kind == TokenKind.PUNCTUATION and token.spelling == "#":
+        # Start of a preprocessor directive
+        last_preprocessor_directive_line = token.extent.start.line
+        last_preprocessor_directive_tokens = [token]
+        continue
 
-print()
+    if token.kind == TokenKind.PUNCTUATION:
+        print("punctuation", token.spelling)
+    elif token.kind == TokenKind.KEYWORD:
+        print("keyword", token.spelling)
+    elif token.kind == TokenKind.IDENTIFIER:
+        print("identifier", map_identifier_token(token))
+    elif token.kind == TokenKind.LITERAL:
+        print("literal", token.spelling)
