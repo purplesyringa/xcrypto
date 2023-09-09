@@ -451,7 +451,7 @@ void BigInt::_normalize() {
     data.pop_back();
   }
 }
-void bigint::BigInt::_normalize_nonzero() {
+void BigInt::_normalize_nonzero() {
   while (data.back() == 0) {
     data.pop_back();
   }
