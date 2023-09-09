@@ -1,8 +1,5 @@
-#pragma GCC target("avx2,fma")
-
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
@@ -13,17 +10,27 @@
 #include <string_view>
 #include <vector>
 
-namespace bigint {
+#ifndef EXPORT
+#define EXPORT
+#endif
 
-static void memzero64(uint64_t *data, size_t count) {
+namespace EXPORT bigint {
+
+constexpr void ensure(bool cond) {
+  if (!cond) {
+    abort();
+  }
+}
+
+void memzero64(uint64_t *data, size_t count) {
   asm volatile("rep stosq" : "+D"(data), "+c"(count) : "a"(0) : "memory");
 }
 
-static void memcpy64(uint64_t *dst, const uint64_t *src, size_t count) {
+void memcpy64(uint64_t *dst, const uint64_t *src, size_t count) {
   asm volatile("rep movsq" : "+D"(dst), "+S"(src), "+c"(count) : : "memory");
 }
 
-struct with_base {
+struct EXPORT with_base {
   uint64_t base;
 };
 
@@ -306,7 +313,7 @@ SmallVec &SmallVec::operator=(ConstSpan rhs) {
 class Ref;
 class ConstRef;
 
-class BigInt {
+class EXPORT BigInt {
   Ref slice(size_t l);
   Ref slice(size_t l, size_t size);
   ConstRef slice(size_t l) const;
@@ -444,7 +451,7 @@ void BigInt::_normalize() {
     data.pop_back();
   }
 }
-void BigInt::_normalize_nonzero() {
+void bigint::BigInt::_normalize_nonzero() {
   while (data.back() == 0) {
     data.pop_back();
   }
@@ -464,7 +471,7 @@ bool BigInt::halve() {
   return carry;
 }
 
-static void add_to(Ref lhs, ConstRef rhs) {
+void add_to(Ref lhs, ConstRef rhs) {
   if (__builtin_expect(rhs.data.empty(), 0)) {
     return;
   }
@@ -515,19 +522,19 @@ inline auto cosines = std::make_unique<double[]>(1);
 inline int cosines_n_pow = -1;
 
 // j = -i
-static __m256d mul_by_j(__m256d vec) {
+__m256d mul_by_j(__m256d vec) {
   return _mm256_xor_pd(_mm256_permute_pd(vec, 5),
                        _mm256_set_pd(-0., 0., -0., 0.));
 }
 
-static __m256d load_w(size_t n, size_t cos, size_t sin) {
+__m256d load_w(size_t n, size_t cos, size_t sin) {
   __m128d reals = _mm_load_pd(&cosines[n + cos]);
   __m128d imags = _mm_load_pd(&cosines[n + sin]);
   return _mm256_set_m128d(_mm_unpackhi_pd(reals, imags),
                           _mm_unpacklo_pd(reals, imags));
 }
 
-static __m256d mul(__m256d a, __m256d b) {
+__m256d mul(__m256d a, __m256d b) {
   return _mm256_fmaddsub_pd(
       _mm256_movedup_pd(a), b,
       _mm256_mul_pd(_mm256_permute_pd(a, 15), _mm256_permute_pd(b, 5)));
@@ -535,7 +542,7 @@ static __m256d mul(__m256d a, __m256d b) {
 
 using Complex = double[2];
 
-static void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
+void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
   size_t old_n = size_t{1} << n_pow;
 
   while (n_pow > 2) {
@@ -592,8 +599,7 @@ static void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
   }
 }
 
-static void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow,
-                                            int count3) {
+void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
   if (count3 == 0) {
     fft_cooley_tukey_no_transpose_4(data, n_pow);
     return;
@@ -677,7 +683,7 @@ inline constexpr int FFT_MIN =
     FFT_CUTOFF - 1; // -1 due to real-fft size halving optimization
 inline constexpr int FFT_MAX = 19;
 
-static constexpr std::pair<int, int> get_counts(int n_pow) {
+constexpr std::pair<int, int> get_counts(int n_pow) {
   int count3 = 0;
   while (n_pow > CT8_CUTOFF) {
     n_pow -= 3;
@@ -691,8 +697,7 @@ static constexpr std::pair<int, int> get_counts(int n_pow) {
   return {count3, count2};
 }
 
-__attribute__((always_inline)) static inline __m256i shiftl(__m256i x,
-                                                            int shift) {
+__attribute__((always_inline)) inline __m256i shiftl(__m256i x, int shift) {
   if (shift > 0) {
     return _mm256_slli_epi32(x, shift);
   } else {
@@ -701,7 +706,7 @@ __attribute__((always_inline)) static inline __m256i shiftl(__m256i x,
 }
 
 template <int N_POW, int... Iterator3, int... Iterator2>
-__attribute__((always_inline)) static inline __m256i
+__attribute__((always_inline)) inline __m256i
 reverse_mixed_radix_const256_impl(__m256i number,
                                   std::integer_sequence<int, Iterator3...>,
                                   std::integer_sequence<int, Iterator2...>) {
@@ -722,8 +727,7 @@ reverse_mixed_radix_const256_impl(__m256i number,
    ...);
   return result;
 }
-template <int N_POW>
-static __m256i reverse_mixed_radix_const256(__m256i number) {
+template <int N_POW> __m256i reverse_mixed_radix_const256(__m256i number) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
   static constexpr int COUNT2 = get_counts(N_POW).second;
   return reverse_mixed_radix_const256_impl<N_POW>(
@@ -732,24 +736,24 @@ static __m256i reverse_mixed_radix_const256(__m256i number) {
 }
 
 template <int... Pows>
-static __m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec,
-                                       std::integer_sequence<int, Pows...>) {
+__m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec,
+                                std::integer_sequence<int, Pows...>) {
   static constexpr __m256i (*dispatch[])(__m256i) = {
       &reverse_mixed_radix_const256<FFT_MIN + Pows>...};
   return dispatch[n_pow - FFT_MIN](vec);
 }
-static uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
+uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
   auto res = reverse_mixed_radix_dyn(
       n_pow,
       _mm256_castsi128_si256(_mm_cvtsi32_si128(static_cast<int>(number))),
       std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
   return static_cast<uint32_t>(_mm256_cvtsi256_si32(res));
 }
-static std::array<uint32_t, 8> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
-                                                       uint32_t b, uint32_t c,
-                                                       uint32_t d, uint32_t e,
-                                                       uint32_t f, uint32_t g,
-                                                       uint32_t h) {
+std::array<uint32_t, 8> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
+                                                uint32_t b, uint32_t c,
+                                                uint32_t d, uint32_t e,
+                                                uint32_t f, uint32_t g,
+                                                uint32_t h) {
   auto res = reverse_mixed_radix_dyn(
       n_pow,
       _mm256_set_epi32(static_cast<int>(h), static_cast<int>(g),
@@ -766,9 +770,9 @@ static std::array<uint32_t, 8> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
           static_cast<uint32_t>(_mm256_extract_epi32(res, 6)),
           static_cast<uint32_t>(_mm256_extract_epi32(res, 7))};
 }
-static std::array<uint32_t, 4> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
-                                                       uint32_t b, uint32_t c,
-                                                       uint32_t d) {
+std::array<uint32_t, 4> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
+                                                uint32_t b, uint32_t c,
+                                                uint32_t d) {
   auto res = reverse_mixed_radix_dyn(
       n_pow,
       _mm256_castsi128_si256(
@@ -781,7 +785,7 @@ static std::array<uint32_t, 4> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
           static_cast<uint32_t>(_mm256_extract_epi32(res, 3))};
 }
 
-static void ensure_twiddle_factors(int want_n_pow) {
+void ensure_twiddle_factors(int want_n_pow) {
   static constexpr double PI = 3.1415926535897931;
   while (cosines_n_pow < want_n_pow) {
     cosines_n_pow++;
@@ -799,7 +803,7 @@ static void ensure_twiddle_factors(int want_n_pow) {
   }
 }
 
-static auto fft_cooley_tukey(Complex *data, int n_pow) {
+auto fft_cooley_tukey(Complex *data, int n_pow) {
   ensure_twiddle_factors(n_pow);
   int count3 = get_counts(n_pow).first;
   fft_cooley_tukey_no_transpose_8(data, n_pow, count3);
@@ -810,22 +814,22 @@ static auto fft_cooley_tukey(Complex *data, int n_pow) {
 
 // Credits to https://stackoverflow.com/a/41148578
 // Only work for inputs in the range: [0, 2^52)
-static __m256i double_to_uint64(__m256d x) {
+__m256i double_to_uint64(__m256d x) {
   x = _mm256_add_pd(x, _mm256_set1_pd(0x0010000000000000));
   return _mm256_castpd_si256(
       _mm256_xor_pd(x, _mm256_set1_pd(0x0010000000000000)));
 }
-static __m256d uint64_to_double(__m256i x) {
+__m256d uint64_to_double(__m256i x) {
   auto y = _mm256_castsi256_pd(x);
   y = _mm256_or_pd(y, _mm256_set1_pd(0x0010000000000000));
   return _mm256_sub_pd(y, _mm256_set1_pd(0x0010000000000000));
 }
 
-static int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
+int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
   return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size() - 1) * 4 - 1);
 }
 
-static BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
+BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   int n_pow = get_fft_n_pow(lhs, rhs);
   size_t n = size_t{1} << n_pow;
 
@@ -955,7 +959,7 @@ static BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // if (max_error >= 0.05) {
   //   std::cerr << max_error << " " << n_pow << std::endl;
   // }
-  assert(max_error < 0.4);
+  ensure(max_error < 0.4);
 
   if (carry > 0) {
     result.data.push_back(carry);
@@ -965,7 +969,7 @@ static BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
 
   // std::cerr << lhs.data.size() + rhs.data.size() << " -> " <<
   // result.data.size() << std::endl;
-  assert(result.data.size() == lhs.data.size() + rhs.data.size() ||
+  ensure(result.data.size() == lhs.data.size() + rhs.data.size() ||
          result.data.size() == lhs.data.size() + rhs.data.size() - 1);
 
   return result;
@@ -984,7 +988,7 @@ BigInt::BigInt(uint64_t value) {
   data.set_size(value > 0);
 }
 BigInt::BigInt(int value) {
-  assert(value >= 0);
+  ensure(value >= 0);
   if (value > 0) {
     data = {static_cast<uint64_t>(value)};
   }
@@ -1035,7 +1039,7 @@ BigInt &BigInt::operator-=(ConstRef rhs) {
     return *this;
   }
 
-  assert(data.size() >= rhs.data.size());
+  ensure(data.size() >= rhs.data.size());
 
   size_t offset = 0;
   uint64_t value1, value2;
@@ -1138,13 +1142,13 @@ uint32_t BigInt::divmod_inplace(uint32_t rhs) {
 }
 
 // Credits to https://stackoverflow.com/a/35780435
-static constexpr uint64_t inv_2_64(uint64_t x) {
-  assert(x % 2 == 1);
+constexpr uint64_t inv_2_64(uint64_t x) {
+  ensure(x % 2 == 1);
   uint64_t r = x;
   for (int i = 0; i < 5; i++) {
     r = r * (2 - r * x);
   }
-  assert(r * x == 1);
+  ensure(r * x == 1);
   return r;
 }
 
@@ -1159,7 +1163,7 @@ void BigInt::divide_inplace_whole(uint64_t rhs) {
     data[i] = res_word;
     borrow += __uint128_t{res_word} * rhs >> 64;
   }
-  assert(borrow == 0);
+  ensure(borrow == 0);
   _normalize();
 }
 
@@ -1172,9 +1176,9 @@ BigInt operator*(BigInt lhs, uint64_t rhs) { return lhs *= rhs; }
 BigInt operator/(BigInt lhs, uint32_t rhs) { return lhs /= rhs; }
 
 BigInt operator*(ConstRef lhs, ConstRef rhs);
-static void mul_to(Ref result, ConstRef lhs, ConstRef rhs);
+void mul_to(Ref result, ConstRef lhs, ConstRef rhs);
 
-static ConstRef mul_to_ref(Ref result, ConstRef lhs, ConstRef rhs) {
+ConstRef mul_to_ref(Ref result, ConstRef lhs, ConstRef rhs) {
   mul_to(result, lhs, rhs);
   size_t len = 0;
   if (!lhs.data.empty() && !rhs.data.empty()) {
@@ -1186,7 +1190,7 @@ static ConstRef mul_to_ref(Ref result, ConstRef lhs, ConstRef rhs) {
   return result.slice(0, len);
 }
 
-static ConstRef mul_to_ref_nonzero(Ref result, ConstRef lhs, ConstRef rhs) {
+ConstRef mul_to_ref_nonzero(Ref result, ConstRef lhs, ConstRef rhs) {
   mul_to(result, lhs, rhs);
   size_t len = lhs.data.size() + rhs.data.size() - 1;
   if (result.data[len] != 0) {
@@ -1195,7 +1199,7 @@ static ConstRef mul_to_ref_nonzero(Ref result, ConstRef lhs, ConstRef rhs) {
   return result.slice(0, len);
 }
 
-static void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
+void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   __uint128_t product = __uint128_t{lhs.data[0]} * rhs.data[0];
   result.data[0] = static_cast<uint64_t>(product);
   if (product >= (__uint128_t{1} << 64)) {
@@ -1203,7 +1207,7 @@ static void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   }
 }
 
-static void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
+void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
   uint64_t carry = 0;
   for (size_t i = 0; i < lhs.data.size(); i++) {
     __uint128_t total = __uint128_t{lhs.data[i]} * rhs + carry;
@@ -1215,8 +1219,8 @@ static void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
   }
 }
 
-__attribute__((noinline)) static void mul_quadratic(Ref result, ConstRef lhs,
-                                                    ConstRef rhs) {
+__attribute__((noinline)) void mul_quadratic(Ref result, ConstRef lhs,
+                                             ConstRef rhs) {
   size_t size = lhs.data.size() + rhs.data.size() - 1;
 
   uint64_t carry_low = 0;
@@ -1264,7 +1268,7 @@ __attribute__((noinline)) static void mul_quadratic(Ref result, ConstRef lhs,
   }
 }
 
-static void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
+void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
   size_t b = std::min(lhs.data.size(), rhs.data.size()) / 2;
 
   ConstRef x0 = lhs.slice(0, b).normalized();
@@ -1278,14 +1282,14 @@ static void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
   add_to(result.slice(b), (x0 + x1) * (y0 + y1) - z0 - z2);
 }
 
-static void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
+void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
   // Split lhs and rhs into
   //   lhs: p(x) = a0 + a1 x + a2 x^2
   //   rhs: q(x) = b0 + b1 x + b2 x^2
   // choosing a size such that we necessarily have a2 > a1, b2 > b1
   size_t b = std::min(lhs.data.size(), rhs.data.size()) / 3 - 1;
-  assert(b * 2 <= lhs.data.size());
-  assert(b * 2 <= rhs.data.size());
+  ensure(b * 2 <= lhs.data.size());
+  ensure(b * 2 <= rhs.data.size());
 
   ConstRef a0 = lhs.slice(0, b).normalized();
   ConstRef a1 = lhs.slice(b, b).normalized();
@@ -1353,8 +1357,8 @@ static void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
   add_to(result.slice(b * 3), c3);
 }
 
-static void mul_disproportional(Ref result, ConstRef lhs, ConstRef rhs) {
-  assert(lhs.data.size() < rhs.data.size());
+void mul_disproportional(Ref result, ConstRef lhs, ConstRef rhs) {
+  ensure(lhs.data.size() < rhs.data.size());
   mul_to(result, lhs, rhs.slice(0, lhs.data.size()).normalized());
   size_t i = lhs.data.size();
   for (; i + lhs.data.size() < rhs.data.size(); i += lhs.data.size()) {
@@ -1363,7 +1367,7 @@ static void mul_disproportional(Ref result, ConstRef lhs, ConstRef rhs) {
   add_to(result.slice(i), lhs * rhs.slice(i));
 }
 
-static void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
+void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
   if (lhs.data.empty() || rhs.data.empty()) {
     return;
   }
@@ -1405,8 +1409,7 @@ BigInt operator*(ConstRef lhs, ConstRef rhs) {
 }
 
 template <typename Iterator, typename Map>
-static uint64_t str_to_int_64(Iterator begin, Iterator end, uint64_t base,
-                              Map map) {
+uint64_t str_to_int_64(Iterator begin, Iterator end, uint64_t base, Map map) {
   uint64_t val = 0;
   for (auto it = end; it != begin;) {
     val *= base;
@@ -1416,19 +1419,17 @@ static uint64_t str_to_int_64(Iterator begin, Iterator end, uint64_t base,
 }
 
 template <typename Iterator, typename Map>
-static __uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base,
-                                  int max_block_len, uint64_t base_product,
-                                  Map map) {
+__uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base,
+                           int max_block_len, uint64_t base_product, Map map) {
   uint64_t low = str_to_int_64(begin, begin + max_block_len, base, map);
   uint64_t high = str_to_int_64(begin + max_block_len, end, base, map);
   return static_cast<__uint128_t>(high) * base_product + low;
 }
 
 template <typename Iterator, typename Map>
-static void str_to_int_inplace(Iterator begin, Iterator end, uint64_t base,
-                               Map map, const BigInt *powers_of_base,
-                               int max_block_len, uint64_t base_product,
-                               BigInt &result) {
+void str_to_int_inplace(Iterator begin, Iterator end, uint64_t base, Map map,
+                        const BigInt *powers_of_base, int max_block_len,
+                        uint64_t base_product, BigInt &result) {
   if (end - begin <= max_block_len) {
     result += str_to_int_64(begin, end, base, map);
     return;
@@ -1463,7 +1464,7 @@ static void str_to_int_inplace(Iterator begin, Iterator end, uint64_t base,
 }
 
 template <typename Iterator, typename Map>
-static BigInt str_to_int(Iterator begin, Iterator end, uint64_t base, Map map) {
+BigInt str_to_int(Iterator begin, Iterator end, uint64_t base, Map map) {
   int max_block_len = 0;
   uint64_t base_product = 1;
   while (base_product <= static_cast<uint64_t>(-1) / base) {
@@ -1487,7 +1488,7 @@ template <typename List, typename> BigInt::BigInt(List &&list, with_base base) {
                      [](uint64_t digit) { return digit; });
 }
 BigInt::BigInt(std::string_view s, with_base base) {
-  assert(base.base <= 36);
+  ensure(base.base <= 36);
   *this = str_to_int(s.rbegin(), s.rend(), base.base, [base](char c) {
     uint64_t digit;
     if ('0' <= c && c <= '9') {
@@ -1495,9 +1496,9 @@ BigInt::BigInt(std::string_view s, with_base base) {
     } else if ('a' <= c && c <= 'z') {
       digit = static_cast<uint64_t>(c - 'a' + 10);
     } else {
-      assert(false);
+      ensure(false);
     }
-    assert(digit < base.base);
+    ensure(digit < base.base);
     return digit;
   });
 }
@@ -1513,4 +1514,4 @@ std::ostream &operator<<(std::ostream &out, ConstRef rhs) {
   return out << std::dec << std::setfill(' ');
 }
 
-} // namespace bigint
+} // namespace EXPORT bigint
