@@ -1246,13 +1246,20 @@ __attribute__((noinline)) void mul_quadratic(Ref result, ConstRef lhs,
         : [b] "m"(rhs.data[i - left])                                          \
         : "flags", "rdx");                                                     \
     left++;                                                                    \
-  } while (0);
+  } while (0)
 
     while (left + 8 <= right) {
-      LOOP LOOP LOOP LOOP LOOP LOOP LOOP LOOP
+      LOOP;
+      LOOP;
+      LOOP;
+      LOOP;
+      LOOP;
+      LOOP;
+      LOOP;
+      LOOP;
     }
     while (left < right) {
-      LOOP
+      LOOP;
     }
 
     result.data[i] = sum_low;
