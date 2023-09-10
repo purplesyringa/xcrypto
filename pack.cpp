@@ -13,7 +13,8 @@ enum class TokenKind {
   KEYWORD,
   IDENTIFIER,
   LITERAL,
-  PREPROCESSOR
+  PREPROCESSOR,
+  STREAM_SEPARATOR
 };
 
 struct Token {
@@ -23,11 +24,16 @@ struct Token {
 
   Token(TokenKind kind, std::string text)
       : kind(kind), text(std::move(text)),
-        hash(std::hash<std::string>{}(this->text) * 5 +
+        hash(std::hash<std::string>{}(this->text) * 6 +
              static_cast<size_t>(kind)) {}
 
   bool operator==(const Token &rhs) const { return hash == rhs.hash; }
   bool operator!=(const Token &rhs) const { return !(*this == rhs); }
+
+  bool is_compressible() const {
+    return kind != TokenKind::PREPROCESSOR &&
+           kind != TokenKind::STREAM_SEPARATOR;
+  }
 };
 
 std::vector<Token> read_tokens() {
@@ -119,23 +125,22 @@ find_non_intersecting_matches_by_token_count(const std::vector<Token> &tokens,
     hsh2 = (int64_t{hsh2} * POW + tokens[i].hash) % MOD2;
   }
 
-  size_t nearest_preprocessor_token = 0;
-  while (nearest_preprocessor_token < tokens.size() &&
-         tokens[nearest_preprocessor_token].kind != TokenKind::PREPROCESSOR) {
-    nearest_preprocessor_token++;
+  size_t nearest_unsplittable_token = 0;
+  while (nearest_unsplittable_token < tokens.size() &&
+         tokens[nearest_unsplittable_token].is_compressible()) {
+    nearest_unsplittable_token++;
   }
 
   for (size_t offset = 0; offset + token_count <= tokens.size(); offset++) {
-    if (nearest_preprocessor_token >= offset + token_count) {
+    if (nearest_unsplittable_token >= offset + token_count) {
       offsets_by_hash[{hsh1, hsh2}].push_back(offset);
     }
     if (offset + token_count < tokens.size()) {
-      if (nearest_preprocessor_token == offset) {
-        nearest_preprocessor_token++;
-        while (nearest_preprocessor_token < tokens.size() &&
-               tokens[nearest_preprocessor_token].kind !=
-                   TokenKind::PREPROCESSOR) {
-          nearest_preprocessor_token++;
+      if (nearest_unsplittable_token == offset) {
+        nearest_unsplittable_token++;
+        while (nearest_unsplittable_token < tokens.size() &&
+               tokens[nearest_unsplittable_token].is_compressible()) {
+          nearest_unsplittable_token++;
         }
       }
       hsh1 = (int64_t{hsh1} * POW + tokens[offset + token_count].hash -
@@ -214,7 +219,7 @@ find_refren(const std::vector<Token> &tokens, size_t repl_len) {
     // Can we extend all these offsets?
     bool extended = false;
     while (offsets.back() + token_count + 1 < tokens.size() &&
-           tokens[offsets[0] + token_count].kind != TokenKind::PREPROCESSOR) {
+           tokens[offsets[0] + token_count].is_compressible()) {
       bool good = true;
       for (size_t i = 1; i < offsets.size(); i++) {
         good = (good && offsets[i] - offsets[i - 1] >= token_count + 1 &&
@@ -243,9 +248,9 @@ find_refren(const std::vector<Token> &tokens, size_t repl_len) {
   return {best_offsets, best_token_count};
 }
 
-std::string FIRST_CHAR_ALPHABET = "abcdefghijklmnopqrstuvwxyz";
+std::string FIRST_CHAR_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789$";
 std::string NEXT_CHARS_ALPHABET =
-    FIRST_CHAR_ALPHABET + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    FIRST_CHAR_ALPHABET + "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 std::string get_id_by_index(size_t index) {
   size_t length = 1;
@@ -265,19 +270,17 @@ std::string get_id_by_index(size_t index) {
   return s;
 }
 
-bool compress_once(std::vector<Token> &tokens,
-                   std::vector<std::string> &defines,
-                   size_t next_free_id_index) {
+bool compress_once(std::vector<Token> &tokens, size_t next_free_id_index,
+                   std::pair<std::string, std::vector<Token>> &define) {
   auto id = get_id_by_index(next_free_id_index);
 
   auto [offsets, token_count] = find_refren(tokens, id.size());
   if (token_count == 0) {
     return false;
   }
-  auto s = stringify_tokens(tokens.begin() + offsets[0],
-                            tokens.begin() + offsets[0] + token_count);
-
-  defines.push_back("#define " + id + " " + s);
+  define = {
+      id,
+      {tokens.begin() + offsets[0], tokens.begin() + offsets[0] + token_count}};
 
   std::vector<Token> new_tokens;
   auto cur_end = tokens.begin();
@@ -300,35 +303,77 @@ int main(int argc, char **argv) {
   next_free_id_index = 0;
 
   // Separate code from #include's so that #define's are placed under includes
-  std::vector<Token> tokens;
+  std::vector<Token> body;
   std::vector<std::string> prologue_directives;
   for (auto &token : read_tokens()) {
     if (token.kind == TokenKind::PREPROCESSOR &&
         token.text.substr(0, 8) == "#include") {
       prologue_directives.push_back(std::move(token.text));
     } else {
-      tokens.push_back(std::move(token));
+      body.push_back(std::move(token));
     }
   }
 
+  std::map<std::string, std::vector<Token>> defines;
   std::string best_s;
+
+  size_t last_good_step = 0;
+  size_t steps_total = 0;
+
   while (true) {
     std::string s;
     for (auto &line : prologue_directives) {
       s += line;
       s += '\n';
     }
-    s += stringify_tokens(tokens.begin(), tokens.end());
+    for (auto &[name, define_tokens] : defines) {
+      s += "#define ";
+      s += name;
+      s += ' ';
+      s += stringify_tokens(define_tokens.begin(), define_tokens.end());
+      s += '\n';
+    }
+    s += stringify_tokens(body.begin(), body.end());
 
     if (best_s.empty() || s.size() < best_s.size()) {
       best_s = std::move(s);
+      last_good_step = steps_total;
     }
+    steps_total++;
+
+    if (steps_total >= 10 && last_good_step * 2 < steps_total) {
+      break;
+    }
+
     if (!compress) {
       break;
     }
-    if (!compress_once(tokens, prologue_directives, next_free_id_index++)) {
+
+    std::vector<Token> tokens;
+    for (auto &[name, define_tokens] : defines) {
+      tokens.insert(tokens.end(),
+                    std::make_move_iterator(define_tokens.begin()),
+                    std::make_move_iterator(define_tokens.end()));
+      tokens.emplace_back(TokenKind::STREAM_SEPARATOR, std::move(name));
+    }
+    tokens.insert(tokens.end(), std::make_move_iterator(body.begin()),
+                  std::make_move_iterator(body.end()));
+
+    std::pair<std::string, std::vector<Token>> define;
+    if (!compress_once(tokens, next_free_id_index++, define)) {
       break;
     }
+
+    body.clear();
+    defines.clear();
+    for (auto &token : tokens) {
+      if (token.kind == TokenKind::STREAM_SEPARATOR) {
+        defines[token.text] = std::move(body);
+      } else {
+        body.push_back(std::move(token));
+      }
+    }
+    defines[define.first] = std::move(define.second);
   }
 
   std::cout << best_s << std::endl;
