@@ -248,30 +248,38 @@ find_refren(const std::vector<Token> &tokens, size_t repl_len) {
   return {best_offsets, best_token_count};
 }
 
-std::string ALPHABET =
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$_";
+std::string FIRST_CHAR_ALPHABET =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
+std::string ALPHABET = "0123456789" + FIRST_CHAR_ALPHABET;
 
-std::string get_id_by_index(size_t index) {
-  size_t length = 1;
-  size_t count_of_this_length = ALPHABET.size();
-  while (index >= count_of_this_length) {
-    index -= count_of_this_length;
-    length++;
-    count_of_this_length *= ALPHABET.size();
-  }
-  std::string s(length + 1, '\0');
-  for (size_t i = 0; i < length; i++) {
-    s[length - i] = ALPHABET[index % ALPHABET.size()];
-    index /= ALPHABET.size();
-  }
-  s[0] = '$';
-  return s;
+void increment_id(std::string &id) {
+  do {
+    size_t i;
+    for (i = id.size() - 1; i > 0; i--) {
+      size_t j = ALPHABET.find(id[i]);
+      j++;
+      if (j == ALPHABET.size()) {
+        id[i] = ALPHABET[0];
+      } else {
+        id[i] = ALPHABET[j];
+        break;
+      }
+    }
+    if (i == 0) {
+      size_t j = FIRST_CHAR_ALPHABET.find(id[0]);
+      j++;
+      if (j == FIRST_CHAR_ALPHABET.size()) {
+        id[0] = ALPHABET[0];
+        id.insert(id.begin(), FIRST_CHAR_ALPHABET[0]);
+      } else {
+        id[i] = FIRST_CHAR_ALPHABET[j];
+      }
+    }
+  } while (id.find('$') == std::string::npos);
 }
 
-bool compress_once(std::vector<Token> &tokens, size_t next_free_id_index,
+bool compress_once(std::vector<Token> &tokens, const std::string &id,
                    std::pair<std::string, std::vector<Token>> &define) {
-  auto id = get_id_by_index(next_free_id_index);
-
   auto [offsets, token_count] = find_refren(tokens, id.size());
   if (token_count == 0) {
     return false;
@@ -298,7 +306,8 @@ int main(int argc, char **argv) {
 
   size_t next_free_id_index;
   std::cin >> next_free_id_index;
-  next_free_id_index = 0;
+
+  std::string next_free_id = "$";
 
   // Separate code from #include's so that #define's are placed under includes
   std::vector<Token> body;
@@ -362,9 +371,10 @@ int main(int argc, char **argv) {
                   std::make_move_iterator(body.end()));
 
     std::pair<std::string, std::vector<Token>> define;
-    if (!compress_once(tokens, next_free_id_index++, define)) {
+    if (!compress_once(tokens, next_free_id, define)) {
       break;
     }
+    increment_id(next_free_id);
 
     body.clear();
     defines.clear();
