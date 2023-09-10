@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <string>
@@ -290,7 +291,9 @@ bool compress_once(
 }
 
 
-int main() {
+int main(int argc, char** argv) {
+    bool compress = argc <= 1 || std::strcmp(argv[1], "-0") != 0;
+
     size_t next_free_id_index;
     std::cin >> next_free_id_index;
     next_free_id_index = 0;
@@ -317,6 +320,9 @@ int main() {
 
         if (best_s.empty() || s.size() < best_s.size()) {
             best_s = std::move(s);
+        }
+        if (!compress) {
+            break;
         }
         if (!compress_once(tokens, prologue_directives, next_free_id_index++)) {
             break;
