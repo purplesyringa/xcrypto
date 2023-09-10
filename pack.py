@@ -9,8 +9,15 @@ import sys
 from typing import Literal, Optional
 
 
-# Prevent clang from expanding intrinsics
+SOURCE = sys.argv[1]
+COMPILER = sys.argv[2]
+
+
+# Prevent clang from expanding intrinsics when compiling for gcc
 def undef_intrinsics():
+    if COMPILER == "clang":
+        return ""
+
     proc = subprocess.run(
         [
             "clang++-16",
@@ -91,7 +98,7 @@ def get_include_paths() -> list[str]:
 
 clang.cindex.conf.set_library_file("libclang-16.so.1")
 
-code = "\n".join(preprocess_code("lib.hpp"))
+code = "\n".join(preprocess_code(SOURCE))
 args = [
     "-std=c++17",
     "-mavx2", "-mfma",
@@ -102,10 +109,10 @@ for path in get_include_paths():
 
 index = clang.cindex.Index.create()
 translation_unit = index.parse(
-    "lib.hpp",
+    SOURCE,
     args=args,
     unsaved_files=[
-        ("lib.hpp", code),
+        (SOURCE, code),
         ("./pack.hpp", pack_hpp)
     ]
 )
@@ -144,7 +151,7 @@ unscoped_identifier_uses = {}
 
 
 def collect_identifiers(node: Cursor, scope: Scope):
-    if node.location.file is not None and node.location.file.name != "lib.hpp":
+    if node.location.file is not None and node.location.file.name != SOURCE:
         return
 
     if node.kind == CursorKind.NAMESPACE:
