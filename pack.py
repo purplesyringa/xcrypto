@@ -264,6 +264,10 @@ def collect_identifiers(node: Cursor, scope: Scope):
         if scope.self_id is None:
             raise ValueError(f"EXPORT is not applicable to {scope.name}")
         scope.parent.preserved_identifiers.add(scope.self_id)
+    elif node.kind == CursorKind.TYPE_ALIAS_DECL:
+        scope.identifiers[node.spelling] = "type"
+        scope = scope.child(name=f"typedef {node.spelling}", self_id=node.spelling)
+        scope_of_node[node.get_usr()] = scope
 
     scope_of_node_extent[node.extent.start.offset] = scope
 
@@ -376,7 +380,8 @@ def map_identifier_token(token: Token) -> (str, TokenKind):
         CursorKind.FUNCTION_DECL,
         CursorKind.CXX_METHOD,
         CursorKind.CONVERSION_FUNCTION,
-        CursorKind.FUNCTION_TEMPLATE
+        CursorKind.FUNCTION_TEMPLATE,
+        CursorKind.TYPE_ALIAS_DECL
     ):
         scope = scope_of_node[node.get_definition().get_usr()]
         text = scope.parent.renames[node.spelling]
