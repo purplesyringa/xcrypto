@@ -101,24 +101,25 @@ std::string stringify_tokens(It begin, It end) {
 }
 
 
-// Find the longest list of non-intersecting equal series of given length in a string
-std::vector<size_t> find_non_intersecting_matches_by_length(const std::vector<Token>& tokens,
-                                                            size_t length) {
+// Find a list of non-intersecting equal series of given length in a string maximizing f
+template<typename F>
+std::vector<size_t> find_non_intersecting_matches_by_token_count(const std::vector<Token>& tokens,
+                                                                 size_t token_count, F f) {
     static constexpr int32_t POW = 312;
     static constexpr int32_t MOD1 = 1000000007;
     static constexpr int32_t MOD2 = 1000000009;
 
-    int32_t pow_length1 = 1;
-    int32_t pow_length2 = 1;
-    for (size_t i = 0; i < length; i++) {
-        pow_length1 = int64_t{pow_length1} * POW % MOD1;
-        pow_length2 = int64_t{pow_length2} * POW % MOD2;
+    int32_t pow_token_count1 = 1;
+    int32_t pow_token_count2 = 1;
+    for (size_t i = 0; i < token_count; i++) {
+        pow_token_count1 = int64_t{pow_token_count1} * POW % MOD1;
+        pow_token_count2 = int64_t{pow_token_count2} * POW % MOD2;
     }
 
     std::map<std::pair<int32_t, int32_t>, std::vector<size_t>> offsets_by_hash;
     int32_t hsh1 = 0;
     int32_t hsh2 = 0;
-    for (size_t i = 0; i < length; i++) {
+    for (size_t i = 0; i < token_count; i++) {
         hsh1 = (int64_t{hsh1} * POW + tokens[i].hash()) % MOD1;
         hsh2 = (int64_t{hsh2} * POW + tokens[i].hash()) % MOD2;
     }
@@ -128,11 +129,11 @@ std::vector<size_t> find_non_intersecting_matches_by_length(const std::vector<To
         nearest_preprocessor_token++;
     }
 
-    for (size_t offset = 0; offset + length <= tokens.size(); offset++) {
-        if (nearest_preprocessor_token >= offset + length) {
+    for (size_t offset = 0; offset + token_count <= tokens.size(); offset++) {
+        if (nearest_preprocessor_token >= offset + token_count) {
             offsets_by_hash[{hsh1, hsh2}].push_back(offset);
         }
-        if (offset + length < tokens.size()) {
+        if (offset + token_count < tokens.size()) {
             if (nearest_preprocessor_token == offset) {
                 nearest_preprocessor_token++;
                 while (nearest_preprocessor_token < tokens.size() && tokens[nearest_preprocessor_token].kind != TokenKind::PREPROCESSOR) {
@@ -141,13 +142,13 @@ std::vector<size_t> find_non_intersecting_matches_by_length(const std::vector<To
             }
             hsh1 = (
                 int64_t{hsh1} * POW
-                + tokens[offset + length].hash()
-                - int64_t{tokens[offset].hash()} * pow_length1
+                + tokens[offset + token_count].hash()
+                - int64_t{tokens[offset].hash()} * pow_token_count1
             ) % MOD1;
             hsh2 = (
                 int64_t{hsh2} * POW
-                + tokens[offset + length].hash()
-                - int64_t{tokens[offset].hash()} * pow_length2
+                + tokens[offset + token_count].hash()
+                - int64_t{tokens[offset].hash()} * pow_token_count2
             ) % MOD2;
             if (hsh1 < 0) {
                 hsh1 += MOD1;
@@ -158,37 +159,36 @@ std::vector<size_t> find_non_intersecting_matches_by_length(const std::vector<To
         }
     }
 
-    size_t max_count = 1;
-    std::vector<size_t> max_count_offsets{0};
+    size_t max_value = 0;
+    std::vector<size_t> best_offsets;
 
     for (auto& [hsh, offsets]: offsets_by_hash) {
-        if (offsets.back() - offsets[0] < length) {
+        if (offsets.back() - offsets[0] < token_count) {
             continue;
         }
         size_t count = 0;
-        size_t last_offset = -length;
+        size_t last_offset = -token_count;
         for (size_t offset: offsets) {
-            if (offset >= last_offset + length) {
+            if (offset >= last_offset + token_count) {
                 count++;
                 last_offset = offset;
             }
         }
-        if (count > max_count) {
-            max_count = count;
-            max_count_offsets = std::move(offsets);
+        size_t value = f(offsets[0], count);
+        if (value > max_value) {
+            max_value = value;
+            best_offsets = std::move(offsets);
         }
     }
 
     std::vector<size_t> non_intersecting_offsets;
-    size_t last_offset = -length;
-    for (size_t offset: max_count_offsets) {
-        if (offset >= last_offset + length) {
+    size_t last_offset = -token_count;
+    for (size_t offset: best_offsets) {
+        if (offset >= last_offset + token_count) {
             non_intersecting_offsets.push_back(offset);
             last_offset = offset;
         }
     }
-
-    assert(non_intersecting_offsets.size() == max_count);
     return non_intersecting_offsets;
 }
 
@@ -196,46 +196,58 @@ std::vector<size_t> find_non_intersecting_matches_by_length(const std::vector<To
 // Find a substring t of string s maximizing (len(t) - repl_len) * (matches(s, t) - 1), where the
 // matches are non-intersecting. Returns offsets at which the substring is present and length.
 std::pair<std::vector<size_t>, size_t> find_refren(const std::vector<Token>& tokens, size_t repl_len) {
-    size_t length = 1;
-    auto offsets = find_non_intersecting_matches_by_length(tokens, length);
-
-    size_t best_win = 0;
+    size_t best_value = 0;
+    size_t best_token_count = 0;
     std::vector<size_t> best_offsets;
-    size_t best_length = 0;
 
-    while (length <= tokens.size() / 2 && offsets.size() > 1) {
-        std::string s = stringify_tokens(tokens.begin() + offsets[0], tokens.begin() + offsets[0] + length);
-        if (s.size() > repl_len) {
-            size_t win = (s.size() - repl_len) * (offsets.size() - 1);
-            if (win > best_win) {
-                best_win = win;
-                best_offsets = offsets;
-                best_length = length;
+    for (size_t token_count = 1; token_count <= tokens.size(); ) {
+        auto f = [&](size_t offset, size_t count) {
+            std::string s = stringify_tokens(tokens.begin() + offset, tokens.begin() + offset + token_count);
+            if (s.size() < repl_len) {
+                return size_t{0};
+            }
+            return (s.size() - repl_len) * (count - 1);
+        };
+
+        auto offsets = find_non_intersecting_matches_by_token_count(tokens, token_count, f);
+        if (offsets.empty()) {
+            break;
+        }
+
+        // Can we extend all these offsets?
+        bool extended = false;
+        while (
+            offsets.back() + token_count + 1 < tokens.size()
+            && tokens[offsets[0] + token_count].kind != TokenKind::PREPROCESSOR
+        ) {
+            bool good = true;
+            for (size_t i = 1; i < offsets.size(); i++) {
+                good = (
+                    good
+                    && offsets[i] - offsets[i - 1] >= token_count + 1
+                    && tokens[offsets[i] + token_count] == tokens[offsets[0] + token_count]
+                );
+            }
+            if (good) {
+                extended = true;
+                token_count++;
+            } else {
+                break;
             }
         }
 
-        // Chances are length-1 will have the same len(offsets), which is... not terribly efficient.
-        // Binary-search just how much we have to increase length to decrease len(offsets)
-
-        size_t step = length;
-        bool incremented = false;
-        while (step >= 3) {
-            auto offsets2 = find_non_intersecting_matches_by_length(tokens, length + step);
-            if (offsets.size() == offsets2.size()) {
-                offsets = offsets2;
-                length += step;
-                incremented = true;
+        if (!extended) {
+            size_t value = f(offsets[0], offsets.size());
+            if (value > best_value) {
+                best_value = value;
+                best_token_count = token_count;
+                best_offsets = std::move(offsets);
             }
-            step /= 2;
-        }
-
-        if (!incremented) {
-            length++;
-            offsets = find_non_intersecting_matches_by_length(tokens, length);
+            token_count++;
         }
     }
 
-    return {best_offsets, best_length};
+    return {best_offsets, best_token_count};
 }
 
 
@@ -269,11 +281,11 @@ bool compress_once(
 ) {
     auto id = get_id_by_index(next_free_id_index);
 
-    auto [offsets, length] = find_refren(tokens, id.size());
-    if (length == 0) {
+    auto [offsets, token_count] = find_refren(tokens, id.size());
+    if (token_count == 0) {
         return false;
     }
-    auto s = stringify_tokens(tokens.begin() + offsets[0], tokens.begin() + offsets[0] + length);
+    auto s = stringify_tokens(tokens.begin() + offsets[0], tokens.begin() + offsets[0] + token_count);
 
     defines.push_back("#define " + id + " " + s);
 
@@ -282,7 +294,7 @@ bool compress_once(
     for (size_t offset: offsets) {
         new_tokens.insert(new_tokens.end(), cur_end, tokens.begin() + offset);
         new_tokens.emplace_back(TokenKind::IDENTIFIER, id);
-        cur_end = tokens.begin() + offset + length;
+        cur_end = tokens.begin() + offset + token_count;
     }
     new_tokens.insert(new_tokens.end(), cur_end, tokens.end());
 
