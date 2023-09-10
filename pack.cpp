@@ -248,25 +248,23 @@ find_refren(const std::vector<Token> &tokens, size_t repl_len) {
   return {best_offsets, best_token_count};
 }
 
-std::string FIRST_CHAR_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789$";
-std::string NEXT_CHARS_ALPHABET =
-    FIRST_CHAR_ALPHABET + "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+std::string ALPHABET =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$_";
 
 std::string get_id_by_index(size_t index) {
   size_t length = 1;
-  size_t count_of_this_length = FIRST_CHAR_ALPHABET.size();
+  size_t count_of_this_length = ALPHABET.size();
   while (index >= count_of_this_length) {
     index -= count_of_this_length;
     length++;
-    count_of_this_length *= NEXT_CHARS_ALPHABET.size();
+    count_of_this_length *= ALPHABET.size();
   }
   std::string s(length + 1, '\0');
-  for (size_t i = 0; i < length - 1; i++) {
-    s[length - i] = NEXT_CHARS_ALPHABET[index % NEXT_CHARS_ALPHABET.size()];
-    index /= NEXT_CHARS_ALPHABET.size();
+  for (size_t i = 0; i < length; i++) {
+    s[length - i] = ALPHABET[index % ALPHABET.size()];
+    index /= ALPHABET.size();
   }
-  s[0] = '_';
-  s[1] = FIRST_CHAR_ALPHABET[index];
+  s[0] = '$';
   return s;
 }
 
@@ -329,7 +327,11 @@ int main(int argc, char **argv) {
     for (auto &[name, define_tokens] : defines) {
       s += "#define ";
       s += name;
+      // When uncommented, this still works, but yields warnings
+      // if (define_tokens[0].kind != TokenKind::PUNCTUATION ||
+      // define_tokens[0].text == "(") {
       s += ' ';
+      // }
       s += stringify_tokens(define_tokens.begin(), define_tokens.end());
       s += '\n';
     }
