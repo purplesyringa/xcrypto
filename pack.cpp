@@ -19,16 +19,14 @@ enum class TokenKind {
 struct Token {
   TokenKind kind;
   std::string text;
+  int32_t hash;
 
-  Token(TokenKind kind, std::string text) : kind(kind), text(std::move(text)) {}
+  Token(TokenKind kind, std::string text)
+      : kind(kind), text(std::move(text)),
+        hash(std::hash<std::string>{}(this->text) * 5 +
+             static_cast<size_t>(kind)) {}
 
-  int32_t hash() const {
-    return std::hash<std::string>{}(text)*5 + static_cast<size_t>(kind);
-  }
-  bool operator==(const Token &rhs) const {
-    return hash() == rhs.hash();
-    // return kind == rhs.kind && text == rhs.text;
-  }
+  bool operator==(const Token &rhs) const { return hash == rhs.hash; }
   bool operator!=(const Token &rhs) const { return !(*this == rhs); }
 };
 
@@ -117,8 +115,8 @@ find_non_intersecting_matches_by_token_count(const std::vector<Token> &tokens,
   int32_t hsh1 = 0;
   int32_t hsh2 = 0;
   for (size_t i = 0; i < token_count; i++) {
-    hsh1 = (int64_t{hsh1} * POW + tokens[i].hash()) % MOD1;
-    hsh2 = (int64_t{hsh2} * POW + tokens[i].hash()) % MOD2;
+    hsh1 = (int64_t{hsh1} * POW + tokens[i].hash) % MOD1;
+    hsh2 = (int64_t{hsh2} * POW + tokens[i].hash) % MOD2;
   }
 
   size_t nearest_preprocessor_token = 0;
@@ -140,11 +138,11 @@ find_non_intersecting_matches_by_token_count(const std::vector<Token> &tokens,
           nearest_preprocessor_token++;
         }
       }
-      hsh1 = (int64_t{hsh1} * POW + tokens[offset + token_count].hash() -
-              int64_t{tokens[offset].hash()} * pow_token_count1) %
+      hsh1 = (int64_t{hsh1} * POW + tokens[offset + token_count].hash -
+              int64_t{tokens[offset].hash} * pow_token_count1) %
              MOD1;
-      hsh2 = (int64_t{hsh2} * POW + tokens[offset + token_count].hash() -
-              int64_t{tokens[offset].hash()} * pow_token_count2) %
+      hsh2 = (int64_t{hsh2} * POW + tokens[offset + token_count].hash -
+              int64_t{tokens[offset].hash} * pow_token_count2) %
              MOD2;
       if (hsh1 < 0) {
         hsh1 += MOD1;
