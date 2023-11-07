@@ -458,16 +458,37 @@ void BigInt::_normalize_nonzero() {
 }
 
 bool BigInt::halve() {
-  // Hours wasted trying to optimize this with SIMD or inline assembly: 8
-  bool carry = false;
-  for (size_t i = data.size(); i > 0; i--) {
-    uint64_t word = data[i - 1];
-    data[i - 1] = (word >> 1) | (uint64_t{carry} << 63);
-    carry = word & 1;
+  // rcr/rcl are not going to help performance here, neither will SIMD -- prefer shrd
+  size_t size = data.size();
+  if (size == 0) {
+    return 0;
+  } else if (size == 1) {
+    bool carry = data[0] & 1;
+    data[0] >>= 1;
+    return carry;
   }
-  if (!data.empty() && data.back() == 0) {
-    data.pop_back();
+
+  uint64_t prev = data[0];
+  bool carry = prev & 1;
+
+  size_t i = 1;
+  while (i <= size - 2) {
+    uint64_t word1 = data[i];
+    uint64_t word2 = data[i + 1];
+    data[i - 1] = ((__uint128_t{word1} << 64) | prev) >> 1;
+    data[i] = ((__uint128_t{word2} << 64) | word1) >> 1;
+    prev = word2;
+    i += 2;
   }
+
+  if (i < size) {
+    uint64_t word = data[i];
+    data[i - 1] = ((__uint128_t{word} << 64) | prev) >> 1;
+    prev = word;
+  }
+
+  data.back() = prev >> 1;
+  _normalize();
   return carry;
 }
 
