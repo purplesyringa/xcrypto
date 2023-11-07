@@ -384,13 +384,6 @@ public:
     }
     return {tmp};
   }
-  Ref normalize_nonzero() {
-    Span tmp = data;
-    while (tmp.back() == 0) {
-      tmp.pop_back();
-    }
-    return {tmp};
-  }
 };
 
 class ConstRef {
@@ -415,13 +408,6 @@ public:
   ConstRef normalized() {
     ConstSpan tmp = data;
     while (!tmp.empty() && tmp.back() == 0) {
-      tmp.pop_back();
-    }
-    return {tmp};
-  }
-  ConstRef normalize_nonzero() {
-    ConstSpan tmp = data;
-    while (tmp.back() == 0) {
       tmp.pop_back();
     }
     return {tmp};
