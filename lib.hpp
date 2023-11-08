@@ -753,7 +753,11 @@ reverse_mixed_radix_const256_impl(__m256i number,
    ...);
   return result;
 }
-template <int N_POW> __m256i reverse_mixed_radix_const256(__m256i number) {
+template <int N_POW>
+#ifdef __clang__
+__attribute__((preserve_most))
+#endif
+__m256i reverse_mixed_radix_const256(__m256i number) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
   static constexpr int COUNT2 = get_counts(N_POW).second;
   return reverse_mixed_radix_const256_impl<N_POW>(
@@ -764,39 +768,20 @@ template <int N_POW> __m256i reverse_mixed_radix_const256(__m256i number) {
 template <int... Pows>
 __m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec,
                                 std::integer_sequence<int, Pows...>) {
-  static constexpr __m256i (*dispatch[])(__m256i) = {
+  static constexpr __m256i (*
+#ifdef __clang__
+  __attribute__((preserve_most))
+#endif
+  dispatch[])(__m256i) = {
       &reverse_mixed_radix_const256<FFT_MIN + Pows>...};
   return dispatch[n_pow - FFT_MIN](vec);
 }
-uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
-  auto res = reverse_mixed_radix_dyn(
-      n_pow,
-      _mm256_castsi128_si256(_mm_cvtsi32_si128(static_cast<int>(number))),
-      std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
-  return static_cast<uint32_t>(_mm256_cvtsi256_si32(res));
-}
-__m256d reverse_mixed_radix_dyn(int n_pow, __m256d vec) {
+__m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec) {
   return reverse_mixed_radix_dyn(n_pow, vec, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
 }
-std::array<uint32_t, 8> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
-                                                uint32_t b, uint32_t c,
-                                                uint32_t d, uint32_t e,
-                                                uint32_t f, uint32_t g,
-                                                uint32_t h) {
-  auto res = reverse_mixed_radix_dyn(
-      n_pow,
-      _mm256_set_epi32(static_cast<int>(h), static_cast<int>(g),
-                       static_cast<int>(f), static_cast<int>(e),
-                       static_cast<int>(d), static_cast<int>(c),
-                       static_cast<int>(b), static_cast<int>(a)));
-  return {static_cast<uint32_t>(_mm256_extract_epi32(res, 0)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 1)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 2)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 3)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 4)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 5)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 6)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 7))};
+uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
+  auto res = reverse_mixed_radix_dyn(n_pow, _mm256_castsi128_si256(_mm_cvtsi32_si128(static_cast<int>(number))));
+  return static_cast<uint32_t>(_mm256_cvtsi256_si32(res));
 }
 std::array<uint32_t, 4> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
                                                 uint32_t b, uint32_t c,
@@ -877,8 +862,8 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   const uint16_t *rhs_data = reinterpret_cast<const uint16_t *>(rhs.data.data());
   for (size_t i = 0; i < lhs.data.size(); i++) {
     __m128i a = _mm_unpacklo_epi16( _mm_cvtsi64_si128(lhs.data[i]), _mm_cvtsi64_si128(rhs.data[i]));
-    __m256i b = uint64_to_double(_mm256_cvtepu16_epi64(a));
-    __m256i c = uint64_to_double(_mm256_cvtepu16_epi64(_mm_castsi128_pd(_mm_permute_pd(_mm_castsi128_pd(a), 1))));
+    __m256d b = uint64_to_double(_mm256_cvtepu16_epi64(a));
+    __m256d c = uint64_to_double(_mm256_cvtepu16_epi64(_mm_castpd_si128(_mm_permute_pd(_mm_castsi128_pd(a), 1))));
     _mm256_store_pd(united_fft[i * 4], b);
     _mm256_store_pd(united_fft[i * 4 + 2], c);
   }
@@ -898,12 +883,7 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // of unity, and then compute FFT of the product as pointwise product of
   // values of lhs and rhs at roots of unity
   size_t united_fft_one = united_fft_access(1);
-  auto get_long_fft_times4 = [&](size_t ai, size_t ai4, size_t ani0,
-                                 size_t ani1, size_t ani04, size_t ani14) {
-    __builtin_prefetch(united_fft[ai4]);
-    __builtin_prefetch(united_fft[ai4 + united_fft_one]);
-    __builtin_prefetch(united_fft[ani04]);
-    __builtin_prefetch(united_fft[ani14]);
+  auto get_long_fft_times4 = [&](size_t ai, size_t ani0, size_t ani1) {
     __m128d z0 = _mm_load_pd(united_fft[ai]);
     __m128d z1 = _mm_load_pd(united_fft[ai + united_fft_one]);
     __m256d z01 = _mm256_set_m128d(z1, z0);
@@ -923,31 +903,18 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // that we only perform half the work
   Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2 + 4];  // CT4 reads out of bounds
   auto twiddles_cur = twiddles + n;
+  __m256i query = _mm256_set_epi32(0, 0, n / 2 - 1, n / 2, n - 1, n, n / 2, 0);
   for (size_t i = 0; i < n / 2; i += 2) {
-    auto r = united_fft_access(
-      _mm256_castsi128_si256(_mm_add_epi32(_mm_set1_epi32(i), _mm_set_epi32(n / 2 + 4, n / 2, 4, 0)))
-    );
+    auto r = united_fft_access(query);
     auto aia = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
-    auto aia4 = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
-    auto aib = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
-    auto aib4 = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
-    r = united_fft_access(
-      _mm256_sub_epi32(
-        _mm256_set_epi32(n / 2 - 5, n / 2 - 4, n / 2 - 1, n / 2, n - 5, n - 4, n - 1, n),
-        _mm256_set1_epi32(i)
-      )
-    );
-    auto ani0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
-    auto ani1a = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
-    auto ani0a4 = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
-    auto ani1a4 = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
+    auto aib = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+    auto ani0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
+    auto ani1a = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
     auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 4));
     auto ani1b = static_cast<uint32_t>(_mm256_extract_epi32(r, 5));
-    auto ani0b4 = static_cast<uint32_t>(_mm256_extract_epi32(r, 6));
-    auto ani1b4 = static_cast<uint32_t>(_mm256_extract_epi32(r, 7));
-    __builtin_prefetch(twiddles[i + 4]);
-    __m256d a = get_long_fft_times4(aia, aia4, ani0a, ani1a, ani0a4, ani1a4);
-    __m256d b = get_long_fft_times4(aib, aib4, ani0b, ani1b, ani0b4, ani1b4);
+    query = _mm256_add_epi32(query, _mm256_set_epi32(0, 0, -2, -2, -2, -2, 2, 2));
+    __m256d a = get_long_fft_times4(aia, ani0a, ani1a);
+    __m256d b = get_long_fft_times4(aib, ani0b, ani1b);
     __m256d c = _mm256_add_pd(a, b);
     __m256d d = _mm256_sub_pd(a, b);
     __m256d e = _mm256_permute_pd(d, 5);
