@@ -606,6 +606,18 @@ void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
   }
 }
 
+// Prevent Clang from substituting memory accesses directly to instructions that use the result,
+// lest memory accesses are duplicated
+__m256d _mm256_load_pd_noopt(double const *mem_addr) {
+  __m256d result;
+  asm(
+    "vmovapd %[memory], %[result];"
+    : [result] "=x"(result)
+    : [memory] "m"(*mem_addr)
+  );
+  return result;
+}
+
 void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
   if (count3 == 0) {
     fft_cooley_tukey_no_transpose_4(data, n_pow);
@@ -618,14 +630,14 @@ void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
   size_t n2 = size_t{1} << (n_pow - 3);
 
   for (size_t i = 0; i < n2; i += 2) {
-    __m256d a0 = _mm256_load_pd(data[i]);
-    __m256d a1 = _mm256_load_pd(data[n2 + i]);
-    __m256d a2 = _mm256_load_pd(data[n2 * 2 + i]);
-    __m256d a3 = _mm256_load_pd(data[n2 * 3 + i]);
-    __m256d a4 = _mm256_load_pd(data[n2 * 4 + i]);
-    __m256d a5 = _mm256_load_pd(data[n2 * 5 + i]);
-    __m256d a6 = _mm256_load_pd(data[n2 * 6 + i]);
-    __m256d a7 = _mm256_load_pd(data[n2 * 7 + i]);
+    __m256d a0 = _mm256_load_pd_noopt(data[i]);
+    __m256d a1 = _mm256_load_pd_noopt(data[n2 + i]);
+    __m256d a2 = _mm256_load_pd_noopt(data[n2 * 2 + i]);
+    __m256d a3 = _mm256_load_pd_noopt(data[n2 * 3 + i]);
+    __m256d a4 = _mm256_load_pd_noopt(data[n2 * 4 + i]);
+    __m256d a5 = _mm256_load_pd_noopt(data[n2 * 5 + i]);
+    __m256d a6 = _mm256_load_pd_noopt(data[n2 * 6 + i]);
+    __m256d a7 = _mm256_load_pd_noopt(data[n2 * 7 + i]);
 
     __m256d e0 = _mm256_add_pd(a0, a4);
     __m256d e1 = _mm256_sub_pd(a0, a4);
@@ -661,21 +673,23 @@ void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
     __m256d b6 = _mm256_sub_pd(c2, d2);
     __m256d b7 = _mm256_sub_pd(c3, d3);
 
-    __m256d w1 = load_w(n, i, i + n / 4);
-    __m256d w2 = load_w(n / 2, i, i + n / 8);
-    __m256d w3 = mul(w1, w2);
-    __m256d w4 = load_w(n / 4, i, i + n / 16);
-    __m256d w5 = mul(w1, w4);
-    __m256d w6 = mul(w3, w3);
-    __m256d w7 = mul(w4, w3);
+    // Clang allocates some values on stack if we don't put a barrier here
+    asm volatile("" : : "x"(b0), "x"(b1), "x"(b2), "x"(b3), "x"(b4), "x"(b5), "x"(b6), "x"(b7));
 
     _mm256_store_pd(data[i], b0);
+    __m256d w1 = load_w(n, i, i + n / 4);
     _mm256_store_pd(data[n2 + i], mul(w1, b1));
+    __m256d w2 = load_w(n / 2, i, i + n / 8);
     _mm256_store_pd(data[n2 * 2 + i], mul(w2, b2));
+    __m256d w3 = mul(w1, w2);
     _mm256_store_pd(data[n2 * 3 + i], mul(w3, b3));
+    __m256d w4 = load_w(n / 4, i, i + n / 16);
     _mm256_store_pd(data[n2 * 4 + i], mul(w4, b4));
+    __m256d w5 = mul(w1, w4);
     _mm256_store_pd(data[n2 * 5 + i], mul(w5, b5));
+    __m256d w6 = mul(w3, w3);
     _mm256_store_pd(data[n2 * 6 + i], mul(w6, b6));
+    __m256d w7 = mul(w4, w3);
     _mm256_store_pd(data[n2 * 7 + i], mul(w7, b7));
   }
 
