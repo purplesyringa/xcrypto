@@ -533,8 +533,17 @@ inline int twiddles_n_pow = -1;
 static const __m256d mul_by_j_constant = _mm256_set_pd(-0., 0., -0., 0.);
 
 // j = -i
-__m256d mul_by_j(__m256d vec) {
-  // Take pressure off p5 by using integer operations
+// Take pressure off p5 by using integer operations
+__m256d mul_by_j_reg(__m256d vec) {
+  __m256d result;
+  asm volatile(
+    "vpxor %[a], %[b], %[c];"
+    : [c] "=x"(result)
+    : [a] "x"(_mm256_set_pd(-0., 0., -0., 0.)), [b] "x"(_mm256_permute_pd(vec, 5))
+  );
+  return result;
+}
+__m256d mul_by_j_mem(__m256d vec) {
   __m256d result;
   asm volatile(
     "vpxor %[a], %[b], %[c];"
@@ -558,16 +567,21 @@ void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
     size_t n2 = size_t{1} << (n_pow - 2);
 
     for (Complex *cur_data = data; cur_data != data + old_n; cur_data += n) {
+      __m256d a0 = _mm256_load_pd(cur_data[0]);
+      __m256d a1 = _mm256_load_pd(cur_data[n2]);
+      __m256d a2 = _mm256_load_pd(cur_data[n2 * 2]);
+      __m256d a3 = _mm256_load_pd(cur_data[n2 * 3]);
+
       for (size_t i = 0; i < n2; i += 2) {
-        __m256d a0 = _mm256_load_pd(cur_data[i]);
-        __m256d a1 = _mm256_load_pd(cur_data[n2 + i]);
-        __m256d a2 = _mm256_load_pd(cur_data[n2 * 2 + i]);
-        __m256d a3 = _mm256_load_pd(cur_data[n2 * 3 + i]);
+        __m256d next_a0 = _mm256_load_pd(cur_data[i + 2]);
+        __m256d next_a1 = _mm256_load_pd(cur_data[n2 + i + 2]);
+        __m256d next_a2 = _mm256_load_pd(cur_data[n2 * 2 + i + 2]);
+        __m256d next_a3 = _mm256_load_pd(cur_data[n2 * 3 + i + 2]);
 
         __m256d c0 = _mm256_add_pd(a0, a2);
         __m256d c1 = _mm256_add_pd(a1, a3);
         __m256d c2 = _mm256_sub_pd(a0, a2);
-        __m256d c3 = mul_by_j(_mm256_sub_pd(a1, a3));
+        __m256d c3 = mul_by_j_reg(_mm256_sub_pd(a1, a3));
 
         __m256d b0 = _mm256_add_pd(c0, c1);
         __m256d b1 = _mm256_add_pd(c2, c3);
@@ -582,6 +596,11 @@ void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
         _mm256_store_pd(cur_data[n2 + i], mul(w1, b1));
         _mm256_store_pd(cur_data[n2 * 2 + i], mul(w2, b2));
         _mm256_store_pd(cur_data[n2 * 3 + i], mul(w3, b3));
+
+        a0 = next_a0;
+        a1 = next_a1;
+        a2 = next_a2;
+        a3 = next_a3;
       }
     }
 
@@ -632,7 +651,7 @@ void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
     __m256d e1 = _mm256_sub_pd(a0, a4);
 
     __m256d f0 = _mm256_add_pd(a2, a6);
-    __m256d f1 = mul_by_j(_mm256_sub_pd(a2, a6));
+    __m256d f1 = mul_by_j_mem(_mm256_sub_pd(a2, a6));
 
     __m256d c0 = _mm256_add_pd(e0, f0);
     __m256d c1 = _mm256_add_pd(e1, f1);
@@ -643,15 +662,15 @@ void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
     __m256d g1 = _mm256_sub_pd(a1, a5);
 
     __m256d h0 = _mm256_add_pd(a3, a7);
-    __m256d h1 = mul_by_j(_mm256_sub_pd(a3, a7));
+    __m256d h1 = mul_by_j_mem(_mm256_sub_pd(a3, a7));
 
     __m256d k0 = _mm256_mul_pd(_mm256_add_pd(g1, h1), rsqrt2);
     __m256d k1 = _mm256_mul_pd(_mm256_sub_pd(g1, h1), rsqrt2);
 
     __m256d d0 = _mm256_add_pd(g0, h0);
-    __m256d d1 = _mm256_add_pd(mul_by_j(k0), k0);
-    __m256d d2 = mul_by_j(_mm256_sub_pd(g0, h0));
-    __m256d d3 = _mm256_sub_pd(mul_by_j(k1), k1);
+    __m256d d1 = _mm256_add_pd(mul_by_j_mem(k0), k0);
+    __m256d d2 = mul_by_j_mem(_mm256_sub_pd(g0, h0));
+    __m256d d3 = _mm256_sub_pd(mul_by_j_mem(k1), k1);
 
     __m256d b0 = _mm256_add_pd(c0, d0);
     __m256d b1 = _mm256_add_pd(c1, d1);
@@ -848,7 +867,7 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   size_t n = size_t{1} << n_pow;
 
   // Split numbers into words
-  Complex *united_fft = new (std::align_val_t(32)) Complex[n];
+  Complex *united_fft = new (std::align_val_t(32)) Complex[n + 4];  // CT4 reads out of bounds
   memzero64(reinterpret_cast<uint64_t *>(united_fft), 2 * n);
 
   const uint16_t *lhs_data =
@@ -892,7 +911,7 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i
   // q(x)) by using the fact that p(x) and q(x) have real coefficients, so
   // that we only perform half the work
-  Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2];
+  Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2 + 4];  // CT4 reads out of bounds
   for (size_t i = 0; i < n / 2; i += 2) {
     size_t ni0a = i == 0 ? 0 : n - i;
     size_t ni1a = n - i - 1;
