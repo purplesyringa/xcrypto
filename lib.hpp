@@ -863,23 +863,32 @@ int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
 }
 
 BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
+  if (lhs.data.size() > rhs.data.size()) {
+    std::swap(lhs, rhs);
+  }
+
   int n_pow = get_fft_n_pow(lhs, rhs);
   size_t n = size_t{1} << n_pow;
 
   // Split numbers into words
   Complex *united_fft = new (std::align_val_t(32)) Complex[n + 4];  // CT4 reads out of bounds
-  memzero64(reinterpret_cast<uint64_t *>(united_fft), 2 * n);
-
-  const uint16_t *lhs_data =
-      reinterpret_cast<const uint16_t *>(lhs.data.data());
-  for (size_t i = 0; i < lhs.data.size() * 4; i++) {
-    united_fft[i][0] = lhs_data[i];
+  const uint16_t *lhs_data = reinterpret_cast<const uint16_t *>(lhs.data.data());
+  const uint16_t *rhs_data = reinterpret_cast<const uint16_t *>(rhs.data.data());
+  for (size_t i = 0; i < lhs.data.size(); i++) {
+    __m128i a = _mm_unpacklo_epi16( _mm_cvtsi64_si128(lhs.data[i]), _mm_cvtsi64_si128(rhs.data[i]));
+    __m256i b = uint64_to_double(_mm256_cvtepu16_epi64(a));
+    __m256i c = uint64_to_double(_mm256_cvtepu16_epi64(_mm_castsi128_pd(_mm_permute_pd(_mm_castsi128_pd(a), 1))));
+    _mm256_store_pd(united_fft[i * 4], b);
+    _mm256_store_pd(united_fft[i * 4 + 2], c);
   }
-  const uint16_t *rhs_data =
-      reinterpret_cast<const uint16_t *>(rhs.data.data());
-  for (size_t i = 0; i < rhs.data.size() * 4; i++) {
-    united_fft[i][1] = rhs_data[i];
+  for (size_t i = lhs.data.size(); i < rhs.data.size(); i++) {
+    __m256d a = uint64_to_double(_mm256_cvtepu16_epi64(_mm_shufflelo_epi16(_mm_cvtsi64_si128(rhs.data[i]), 0b11011000)));
+    __m256d b = _mm256_unpacklo_pd(_mm256_setzero_pd(), a);
+    __m256d c = _mm256_blend_pd(_mm256_setzero_pd(), a, 10);
+    _mm256_store_pd(united_fft[i * 4], b);
+    _mm256_store_pd(united_fft[i * 4 + 2], c);
   }
+  memzero64(reinterpret_cast<uint64_t*>(united_fft + rhs.data.size() * 4), 2 * (n + 4 - rhs.data.size() * 4));
 
   // Parallel FFT for lhs and rhs
   auto united_fft_access = fft_cooley_tukey(united_fft, n_pow);
