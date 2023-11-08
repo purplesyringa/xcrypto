@@ -525,20 +525,23 @@ void add_to(Ref lhs, ConstRef rhs) {
       : "flags", "memory");
 }
 
-inline auto cosines = std::make_unique<double[]>(1);
-inline int cosines_n_pow = -1;
+using Complex = double[2];
+
+inline auto twiddles = new (std::align_val_t(32)) Complex[1];
+inline int twiddles_n_pow = -1;
+
+static const __m256d mul_by_j_constant = _mm256_set_pd(-0., 0., -0., 0.);
 
 // j = -i
 __m256d mul_by_j(__m256d vec) {
-  return _mm256_xor_pd(_mm256_permute_pd(vec, 5),
-                       _mm256_set_pd(-0., 0., -0., 0.));
-}
-
-__m256d load_w(size_t n, size_t cos, size_t sin) {
-  __m128d reals = _mm_load_pd(&cosines[n + cos]);
-  __m128d imags = _mm_load_pd(&cosines[n + sin]);
-  return _mm256_set_m128d(_mm_unpackhi_pd(reals, imags),
-                          _mm_unpacklo_pd(reals, imags));
+  // Take pressure off p5 by using integer operations
+  __m256d result;
+  asm volatile(
+    "vpxor %[a], %[b], %[c];"
+    : [c] "=x"(result)
+    : [a] "m"(mul_by_j_constant), [b] "x"(_mm256_permute_pd(vec, 5))
+  );
+  return result;
 }
 
 __m256d mul(__m256d a, __m256d b) {
@@ -546,8 +549,6 @@ __m256d mul(__m256d a, __m256d b) {
       _mm256_movedup_pd(a), b,
       _mm256_mul_pd(_mm256_permute_pd(a, 15), _mm256_permute_pd(b, 5)));
 }
-
-using Complex = double[2];
 
 void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
   size_t old_n = size_t{1} << n_pow;
@@ -573,8 +574,8 @@ void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
         __m256d b2 = _mm256_sub_pd(c0, c1);
         __m256d b3 = _mm256_sub_pd(c2, c3);
 
-        __m256d w1 = load_w(n, i, i + n / 4);
-        __m256d w2 = load_w(n / 2, i, i + n / 8);
+        __m256d w1 = _mm256_load_pd(twiddles[n + i]);
+        __m256d w2 = _mm256_load_pd(twiddles[n / 2 + i]);
         __m256d w3 = mul(w1, w2);
 
         _mm256_store_pd(cur_data[i], b0);
@@ -606,18 +607,6 @@ void fft_cooley_tukey_no_transpose_4(Complex *data, int n_pow) {
   }
 }
 
-// Prevent Clang from substituting memory accesses directly to instructions that use the result,
-// lest memory accesses are duplicated
-__m256d _mm256_load_pd_noopt(double const *mem_addr) {
-  __m256d result;
-  asm(
-    "vmovapd %[memory], %[result];"
-    : [result] "=x"(result)
-    : [memory] "m"(*mem_addr)
-  );
-  return result;
-}
-
 void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
   if (count3 == 0) {
     fft_cooley_tukey_no_transpose_4(data, n_pow);
@@ -630,14 +619,14 @@ void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
   size_t n2 = size_t{1} << (n_pow - 3);
 
   for (size_t i = 0; i < n2; i += 2) {
-    __m256d a0 = _mm256_load_pd_noopt(data[i]);
-    __m256d a1 = _mm256_load_pd_noopt(data[n2 + i]);
-    __m256d a2 = _mm256_load_pd_noopt(data[n2 * 2 + i]);
-    __m256d a3 = _mm256_load_pd_noopt(data[n2 * 3 + i]);
-    __m256d a4 = _mm256_load_pd_noopt(data[n2 * 4 + i]);
-    __m256d a5 = _mm256_load_pd_noopt(data[n2 * 5 + i]);
-    __m256d a6 = _mm256_load_pd_noopt(data[n2 * 6 + i]);
-    __m256d a7 = _mm256_load_pd_noopt(data[n2 * 7 + i]);
+    __m256d a0 = _mm256_load_pd(data[i]);
+    __m256d a1 = _mm256_load_pd(data[n2 + i]);
+    __m256d a2 = _mm256_load_pd(data[n2 * 2 + i]);
+    __m256d a3 = _mm256_load_pd(data[n2 * 3 + i]);
+    __m256d a4 = _mm256_load_pd(data[n2 * 4 + i]);
+    __m256d a5 = _mm256_load_pd(data[n2 * 5 + i]);
+    __m256d a6 = _mm256_load_pd(data[n2 * 6 + i]);
+    __m256d a7 = _mm256_load_pd(data[n2 * 7 + i]);
 
     __m256d e0 = _mm256_add_pd(a0, a4);
     __m256d e1 = _mm256_sub_pd(a0, a4);
@@ -673,17 +662,14 @@ void fft_cooley_tukey_no_transpose_8(Complex *data, int n_pow, int count3) {
     __m256d b6 = _mm256_sub_pd(c2, d2);
     __m256d b7 = _mm256_sub_pd(c3, d3);
 
-    // Clang allocates some values on stack if we don't put a barrier here
-    asm volatile("" : : "x"(b0), "x"(b1), "x"(b2), "x"(b3), "x"(b4), "x"(b5), "x"(b6), "x"(b7));
-
     _mm256_store_pd(data[i], b0);
-    __m256d w1 = load_w(n, i, i + n / 4);
+    __m256d w1 = _mm256_load_pd(twiddles[n + i]);
     _mm256_store_pd(data[n2 + i], mul(w1, b1));
-    __m256d w2 = load_w(n / 2, i, i + n / 8);
+    __m256d w2 = _mm256_load_pd(twiddles[n / 2 + i]);
     _mm256_store_pd(data[n2 * 2 + i], mul(w2, b2));
     __m256d w3 = mul(w1, w2);
     _mm256_store_pd(data[n2 * 3 + i], mul(w3, b3));
-    __m256d w4 = load_w(n / 4, i, i + n / 16);
+    __m256d w4 = _mm256_load_pd(twiddles[n / 4 + i]);
     _mm256_store_pd(data[n2 * 4 + i], mul(w4, b4));
     __m256d w5 = mul(w1, w4);
     _mm256_store_pd(data[n2 * 5 + i], mul(w5, b5));
@@ -808,18 +794,25 @@ std::array<uint32_t, 4> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
 
 void ensure_twiddle_factors(int want_n_pow) {
   static constexpr double PI = 3.1415926535897931;
-  while (cosines_n_pow < want_n_pow) {
-    cosines_n_pow++;
-    size_t n = size_t{1} << cosines_n_pow;
-    std::unique_ptr<double[]> new_cosines{new double[n * 2]};
-    memcpy64(reinterpret_cast<uint64_t *>(new_cosines.get()),
-             reinterpret_cast<uint64_t *>(cosines.get()), n);
-    cosines = std::move(new_cosines);
+  while (twiddles_n_pow < want_n_pow) {
+    twiddles_n_pow++;
+    size_t n = size_t{1} << twiddles_n_pow;
+    auto new_twiddles = new (std::align_val_t(32)) Complex[n * 2];
+    memcpy64(reinterpret_cast<uint64_t *>(new_twiddles),
+             reinterpret_cast<uint64_t *>(twiddles), n * 2);
+    ::operator delete[](twiddles, std::align_val_t(32));
+    twiddles = new_twiddles;
     double coeff = 2 * PI / static_cast<double>(n);
     for (size_t k = 0; k < n / 2; k++) {
       double c = std::cos(coeff * static_cast<double>(k));
-      cosines[n + k] = c;
-      cosines[n + n / 2 + k] = -c;
+      twiddles[n + k][0] = c;
+      twiddles[n + n / 4 + k][1] = -c;
+      twiddles[n + n / 2 + k][0] = -c;
+      size_t i = n / 4 * 3 + k;
+      if (i >= n) {
+        i -= n;
+      }
+      twiddles[n + i][1] = c;
     }
   }
 }
@@ -910,21 +903,16 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
     auto [ani0a, ani1a, ani0a4, ani1a4, ani0b, ani1b, ani0b4, ani1b4] =
         united_fft_access(ni0a, ni1a, ni0a - 4, ni1a - 4, ni0b, ni1b, ni0b - 4,
                           ni1b - 4);
-    __builtin_prefetch(&cosines[n + n / 4 + i + 6]);
-    __builtin_prefetch(&cosines[n + i + 6]);
+    __builtin_prefetch(&twiddles[n + i + 4]);
     __m256d a = get_long_fft_times4(aia, aia4, ani0a, ani1a, ani0a4, ani1a4);
     __m256d b = get_long_fft_times4(aib, aib4, ani0b, ani1b, ani0b4, ani1b4);
-    __m128d w_real01 = _mm_load_pd(&cosines[n + n / 4 + i]);
-    __m256d w_real0011 =
-        _mm256_permute4x64_pd(_mm256_castpd128_pd256(w_real01), 0x50);
-    __m128d w_imag01 = _mm_load_pd(&cosines[n + i]);
-    __m256d w_imag0011 =
-        _mm256_permute4x64_pd(_mm256_castpd128_pd256(w_imag01), 0x50);
     __m256d c = _mm256_add_pd(a, b);
     __m256d d = _mm256_sub_pd(a, b);
     __m256d e = _mm256_permute_pd(d, 5);
-    __m256d f =
-        _mm256_fmaddsub_pd(w_real0011, d, _mm256_fmaddsub_pd(w_imag0011, e, c));
+    __m256d w = _mm256_load_pd(twiddles[n + i]);
+    __m256d w0 = _mm256_movedup_pd(w);
+    __m256d w1 = _mm256_permute_pd(w, 15);
+    __m256d f = _mm256_fmaddsub_pd(w1, d, _mm256_fmaddsub_pd(w0, e, c));
     __m256d g = _mm256_mul_pd(f, _mm256_set1_pd(0.125));
     _mm256_store_pd(short_fft[i], g);
   }
