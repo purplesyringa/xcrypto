@@ -855,11 +855,14 @@ void mul_united_fft_to_short_fft(Complex *united_fft, Complex *short_fft) {
   // Disentangle real and imaginary values into values of lhs & rhs at roots
   // of unity, and then compute FFT of the product as pointwise product of
   // values of lhs and rhs at roots of unity
-  const size_t united_fft_one = static_cast<uint32_t>(_mm256_cvtsi256_si32(reverse_mixed_radix_const256<N_POW>(_mm256_set1_epi32(1))));
 
-  auto get_long_fft_times4 = [&](size_t ai, size_t ani0, size_t ani1) {
-    __m128d z0 = _mm_load_pd(united_fft[ai]);
-    __m128d z1 = _mm_load_pd(united_fft[ai + united_fft_one]);
+  auto r = reverse_mixed_radix_const256<N_POW>(_mm256_set_epi32(0, 0, 0, 0, 0, 0, n / 2, 1));
+  const size_t united_fft_one = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
+  const size_t united_fft_half_n = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+
+  auto get_long_fft_times4 = [&](size_t ai0, size_t ai1, size_t ani0, size_t ani1) {
+    __m128d z0 = _mm_load_pd(united_fft[ai0]);
+    __m128d z1 = _mm_load_pd(united_fft[ai1]);
     __m256d z01 = _mm256_set_m128d(z1, z0);
     __m128d nz0 = _mm_load_pd(united_fft[ani0]);
     __m128d nz1 = _mm_load_pd(united_fft[ani1]);
@@ -873,18 +876,42 @@ void mul_united_fft_to_short_fft(Complex *united_fft, Complex *short_fft) {
   };
 
   auto twiddles_cur = twiddles + n;
-  __m256i query = _mm256_set_epi32(0, 0, n / 2 - 1, n / 2, n - 1, n, n / 2, 0);
+  // As we have free slots, spend them for prefetch
+  __m256i query = _mm256_set_epi32(0, n / 2 - 4 - 1, n / 2 - 4, 4, 0, n / 2 - 1, n / 2, 0);
   for (size_t i = 0; i < n / 2; i += 2) {
     auto r = reverse_mixed_radix_const256<N_POW>(query);
-    auto aia = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
-    auto aib = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
-    auto ani0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
-    auto ani1a = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
-    auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 4));
-    auto ani1b = static_cast<uint32_t>(_mm256_extract_epi32(r, 5));
-    query = _mm256_add_epi32(query, _mm256_set_epi32(0, 0, -2, -2, -2, -2, 2, 2));
-    __m256d a = get_long_fft_times4(aia, ani0a, ani1a);
-    __m256d b = get_long_fft_times4(aib, ani0b, ani1b);
+
+    auto ai0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
+    auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+    auto ani1b = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
+    auto ai1a = ai0a + united_fft_one;
+    auto ai0b = ai0a + united_fft_half_n;
+    auto ai1b = ai0b + united_fft_one;
+    auto ani0a = i == 0 ? 0 : ani0b + united_fft_half_n;
+    auto ani1a = ani1b + united_fft_half_n;
+
+    auto ai0a_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 4));
+    auto ani0b_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 5));
+    auto ani1b_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 6));
+    auto ai1a_prefetch = ai0a_prefetch + united_fft_one;
+    // ai0b_prefetch is in the same cache line as ai0a_prefetch
+    auto ai1b_prefetch = ai0a_prefetch + united_fft_half_n + united_fft_one;
+    // although these are close, they are in a different cache line
+    auto ani0a_prefetch = ani0b_prefetch + united_fft_half_n;
+    auto ani1a_prefetch = ani1b_prefetch + united_fft_half_n;
+
+    __builtin_prefetch(united_fft[ai0a_prefetch]);
+    __builtin_prefetch(united_fft[ai1a_prefetch]);
+    __builtin_prefetch(united_fft[ani0a_prefetch]);
+    __builtin_prefetch(united_fft[ani1a_prefetch]);
+    __builtin_prefetch(united_fft[ai1b_prefetch]);
+    __builtin_prefetch(united_fft[ani0b_prefetch]);
+    __builtin_prefetch(united_fft[ani1b_prefetch]);
+
+    query = _mm256_add_epi32(query, _mm256_set_epi32(0, -2, -2, 2, 0, -2, -2, 2));
+
+    __m256d a = get_long_fft_times4(ai0a, ai1a, ani0a, ani1a);
+    __m256d b = get_long_fft_times4(ai0b, ai1b, ani0b, ani1b);
     __m256d c = _mm256_add_pd(a, b);
     __m256d d = _mm256_sub_pd(a, b);
     __m256d e = _mm256_permute_pd(d, 5);
@@ -915,7 +942,8 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   size_t n = size_t{1} << n_pow;
 
   // Split numbers into words
-  Complex *united_fft = new (std::align_val_t(32)) Complex[n + 4];  // CT4 reads out of bounds
+  // CT4 reads out of bounds; overaligning to a cache line is more efficient wrt. prefetch
+  Complex *united_fft = new (std::align_val_t(64)) Complex[n + 4];
   const uint16_t *lhs_data = reinterpret_cast<const uint16_t *>(lhs.data.data());
   const uint16_t *rhs_data = reinterpret_cast<const uint16_t *>(rhs.data.data());
   for (size_t i = 0; i < lhs.data.size(); i++) {
@@ -944,7 +972,7 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
 
   mul_united_fft_to_short_fft_dyn(n_pow, united_fft, short_fft);
 
-  ::operator delete[](united_fft, std::align_val_t(32));
+  ::operator delete[](united_fft, std::align_val_t(64));
 
   auto short_fft_access = fft_cooley_tukey(short_fft, n_pow - 1);
 
