@@ -848,6 +848,64 @@ int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
   return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size() - 1) * 4 - 1);
 }
 
+template <int N_POW>
+void mul_united_fft_to_short_fft(Complex *united_fft, Complex *short_fft) {
+  const size_t n = size_t{1} << N_POW;
+
+  // Disentangle real and imaginary values into values of lhs & rhs at roots
+  // of unity, and then compute FFT of the product as pointwise product of
+  // values of lhs and rhs at roots of unity
+  const size_t united_fft_one = static_cast<uint32_t>(_mm256_cvtsi256_si32(reverse_mixed_radix_const256<N_POW>(_mm256_set1_epi32(1))));
+
+  auto get_long_fft_times4 = [&](size_t ai, size_t ani0, size_t ani1) {
+    __m128d z0 = _mm_load_pd(united_fft[ai]);
+    __m128d z1 = _mm_load_pd(united_fft[ai + united_fft_one]);
+    __m256d z01 = _mm256_set_m128d(z1, z0);
+    __m128d nz0 = _mm_load_pd(united_fft[ani0]);
+    __m128d nz1 = _mm_load_pd(united_fft[ani1]);
+    __m256d nz01 = _mm256_set_m128d(nz1, nz0);
+    __m256d a = _mm256_add_pd(z01, nz01);
+    __m256d b = _mm256_sub_pd(z01, nz01);
+    __m256d c = _mm256_blend_pd(a, b, 10);
+    __m256d d = _mm256_permute_pd(a, 15);
+    __m256d g = _mm256_mul_pd(_mm256_permute_pd(c, 5), _mm256_movedup_pd(b));
+    return _mm256_fmsubadd_pd(c, d, g);
+  };
+
+  auto twiddles_cur = twiddles + n;
+  __m256i query = _mm256_set_epi32(0, 0, n / 2 - 1, n / 2, n - 1, n, n / 2, 0);
+  for (size_t i = 0; i < n / 2; i += 2) {
+    auto r = reverse_mixed_radix_const256<N_POW>(query);
+    auto aia = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
+    auto aib = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+    auto ani0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
+    auto ani1a = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
+    auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 4));
+    auto ani1b = static_cast<uint32_t>(_mm256_extract_epi32(r, 5));
+    query = _mm256_add_epi32(query, _mm256_set_epi32(0, 0, -2, -2, -2, -2, 2, 2));
+    __m256d a = get_long_fft_times4(aia, ani0a, ani1a);
+    __m256d b = get_long_fft_times4(aib, ani0b, ani1b);
+    __m256d c = _mm256_add_pd(a, b);
+    __m256d d = _mm256_sub_pd(a, b);
+    __m256d e = _mm256_permute_pd(d, 5);
+    __m256d w = _mm256_load_pd(twiddles_cur[i]);
+    __m256d w0 = _mm256_movedup_pd(w);
+    __m256d w1 = _mm256_permute_pd(w, 15);
+    __m256d f = _mm256_fmaddsub_pd(w1, d, _mm256_fmaddsub_pd(w0, e, c));
+    __m256d g = _mm256_mul_pd(f, _mm256_set1_pd(0.125));
+    _mm256_store_pd(short_fft[i], g);
+  }
+}
+
+template <int... Pows>
+void mul_united_fft_to_short_fft_dyn(int n_pow, Complex *united_fft, Complex *short_fft, std::integer_sequence<int, Pows...>) {
+  static constexpr void (*dispatch[])(Complex *, Complex *) = {&mul_united_fft_to_short_fft<FFT_MIN + Pows>...};
+  return dispatch[n_pow - FFT_MIN](united_fft, short_fft);
+}
+void mul_united_fft_to_short_fft_dyn(int n_pow, Complex *united_fft, Complex *short_fft) {
+  mul_united_fft_to_short_fft_dyn(n_pow, united_fft, short_fft, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+}
+
 BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   if (lhs.data.size() > rhs.data.size()) {
     std::swap(lhs, rhs);
@@ -879,52 +937,12 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // Parallel FFT for lhs and rhs
   auto united_fft_access = fft_cooley_tukey(united_fft, n_pow);
 
-  // Disentangle real and imaginary values into values of lhs & rhs at roots
-  // of unity, and then compute FFT of the product as pointwise product of
-  // values of lhs and rhs at roots of unity
-  size_t united_fft_one = united_fft_access(1);
-  auto get_long_fft_times4 = [&](size_t ai, size_t ani0, size_t ani1) {
-    __m128d z0 = _mm_load_pd(united_fft[ai]);
-    __m128d z1 = _mm_load_pd(united_fft[ai + united_fft_one]);
-    __m256d z01 = _mm256_set_m128d(z1, z0);
-    __m128d nz0 = _mm_load_pd(united_fft[ani0]);
-    __m128d nz1 = _mm_load_pd(united_fft[ani1]);
-    __m256d nz01 = _mm256_set_m128d(nz1, nz0);
-    __m256d a = _mm256_add_pd(z01, nz01);
-    __m256d b = _mm256_sub_pd(z01, nz01);
-    __m256d c = _mm256_blend_pd(a, b, 10);
-    __m256d d = _mm256_permute_pd(a, 15);
-    __m256d g = _mm256_mul_pd(_mm256_permute_pd(c, 5), _mm256_movedup_pd(b));
-    return _mm256_fmsubadd_pd(c, d, g);
-  };
-
   // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i
   // q(x)) by using the fact that p(x) and q(x) have real coefficients, so
   // that we only perform half the work
   Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2 + 4];  // CT4 reads out of bounds
-  auto twiddles_cur = twiddles + n;
-  __m256i query = _mm256_set_epi32(0, 0, n / 2 - 1, n / 2, n - 1, n, n / 2, 0);
-  for (size_t i = 0; i < n / 2; i += 2) {
-    auto r = united_fft_access(query);
-    auto aia = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
-    auto aib = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
-    auto ani0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
-    auto ani1a = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
-    auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 4));
-    auto ani1b = static_cast<uint32_t>(_mm256_extract_epi32(r, 5));
-    query = _mm256_add_epi32(query, _mm256_set_epi32(0, 0, -2, -2, -2, -2, 2, 2));
-    __m256d a = get_long_fft_times4(aia, ani0a, ani1a);
-    __m256d b = get_long_fft_times4(aib, ani0b, ani1b);
-    __m256d c = _mm256_add_pd(a, b);
-    __m256d d = _mm256_sub_pd(a, b);
-    __m256d e = _mm256_permute_pd(d, 5);
-    __m256d w = _mm256_load_pd(twiddles_cur[i]);
-    __m256d w0 = _mm256_movedup_pd(w);
-    __m256d w1 = _mm256_permute_pd(w, 15);
-    __m256d f = _mm256_fmaddsub_pd(w1, d, _mm256_fmaddsub_pd(w0, e, c));
-    __m256d g = _mm256_mul_pd(f, _mm256_set1_pd(0.125));
-    _mm256_store_pd(short_fft[i], g);
-  }
+
+  mul_united_fft_to_short_fft_dyn(n_pow, united_fft, short_fft);
 
   ::operator delete[](united_fft, std::align_val_t(32));
 
