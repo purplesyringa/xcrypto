@@ -794,7 +794,7 @@ void fft_cooley_tukey(Complex *data, int n_pow) {
 }
 
 // Credits to https://stackoverflow.com/a/41148578
-// Only work for inputs in the range: [0, 2^52)
+// Only work for inputs in the range: [-0.25, 2^52 + 0.5)
 __m256d uint64_to_double(__m256i x) {
   auto y = _mm256_castsi256_pd(x);
   y = _mm256_or_pd(y, _mm256_set1_pd(0x0010000000000000));
