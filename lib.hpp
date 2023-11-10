@@ -733,9 +733,9 @@ __attribute__((always_inline)) inline __m256i shiftl(__m256i x, int shift) {
 
 template <int N_POW, int... Iterator3, int... Iterator2>
 __attribute__((always_inline)) inline __m256i
-reverse_mixed_radix_const256_impl(__m256i number,
-                                  std::integer_sequence<int, Iterator3...>,
-                                  std::integer_sequence<int, Iterator2...>) {
+reverse_mixed_radix_impl(__m256i number,
+                         std::integer_sequence<int, Iterator3...>,
+                         std::integer_sequence<int, Iterator2...>) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
   __m256i result = _mm256_setzero_si256();
   ((result = _mm256_or_si256(
@@ -754,47 +754,12 @@ reverse_mixed_radix_const256_impl(__m256i number,
   return result;
 }
 template <int N_POW>
-#ifdef __clang__
-__attribute__((preserve_most))
-#endif
-__m256i reverse_mixed_radix_const256(__m256i number) {
+__attribute__((always_inline)) inline __m256i reverse_mixed_radix(__m256i number) {
   static constexpr int COUNT3 = get_counts(N_POW).first;
   static constexpr int COUNT2 = get_counts(N_POW).second;
-  return reverse_mixed_radix_const256_impl<N_POW>(
+  return reverse_mixed_radix_impl<N_POW>(
       number, std::make_integer_sequence<int, COUNT3>(),
       std::make_integer_sequence<int, COUNT2>());
-}
-
-template <int... Pows>
-__m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec,
-                                std::integer_sequence<int, Pows...>) {
-  static constexpr __m256i (*
-#ifdef __clang__
-  __attribute__((preserve_most))
-#endif
-  dispatch[])(__m256i) = {
-      &reverse_mixed_radix_const256<FFT_MIN + Pows>...};
-  return dispatch[n_pow - FFT_MIN](vec);
-}
-__m256i reverse_mixed_radix_dyn(int n_pow, __m256i vec) {
-  return reverse_mixed_radix_dyn(n_pow, vec, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
-}
-uint32_t reverse_mixed_radix_dyn(int n_pow, uint32_t number) {
-  auto res = reverse_mixed_radix_dyn(n_pow, _mm256_castsi128_si256(_mm_cvtsi32_si128(static_cast<int>(number))));
-  return static_cast<uint32_t>(_mm256_cvtsi256_si32(res));
-}
-std::array<uint32_t, 4> reverse_mixed_radix_dyn(int n_pow, uint32_t a,
-                                                uint32_t b, uint32_t c,
-                                                uint32_t d) {
-  auto res = reverse_mixed_radix_dyn(
-      n_pow,
-      _mm256_castsi128_si256(
-          _mm_set_epi32(static_cast<int>(d), static_cast<int>(c),
-                        static_cast<int>(b), static_cast<int>(a))));
-  return {static_cast<uint32_t>(_mm256_extract_epi32(res, 0)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 1)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 2)),
-          static_cast<uint32_t>(_mm256_extract_epi32(res, 3))};
 }
 
 void ensure_twiddle_factors(int want_n_pow) {
@@ -822,13 +787,10 @@ void ensure_twiddle_factors(int want_n_pow) {
   }
 }
 
-auto fft_cooley_tukey(Complex *data, int n_pow) {
+void fft_cooley_tukey(Complex *data, int n_pow) {
   ensure_twiddle_factors(n_pow);
   int count3 = get_counts(n_pow).first;
   fft_cooley_tukey_no_transpose_8(data, n_pow, count3);
-  return [n_pow](auto... args) {
-    return reverse_mixed_radix_dyn(n_pow, args...);
-  };
 }
 
 // Credits to https://stackoverflow.com/a/41148578
@@ -849,14 +811,43 @@ int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
 }
 
 template <int N_POW>
-void mul_united_fft_to_short_fft(Complex *united_fft, Complex *short_fft) {
+BigInt mul_fft_fixed(ConstRef lhs, ConstRef rhs) {
   const size_t n = size_t{1} << N_POW;
+
+  // Split numbers into words
+  // CT4 reads out of bounds; overaligning to a cache line is more efficient wrt. prefetch
+  Complex *united_fft = new (std::align_val_t(64)) Complex[n + 4];
+  const uint16_t *lhs_data = reinterpret_cast<const uint16_t *>(lhs.data.data());
+  const uint16_t *rhs_data = reinterpret_cast<const uint16_t *>(rhs.data.data());
+  for (size_t i = 0; i < lhs.data.size(); i++) {
+    __m128i a = _mm_unpacklo_epi16( _mm_cvtsi64_si128(lhs.data[i]), _mm_cvtsi64_si128(rhs.data[i]));
+    __m256d b = uint64_to_double(_mm256_cvtepu16_epi64(a));
+    __m256d c = uint64_to_double(_mm256_cvtepu16_epi64(_mm_castpd_si128(_mm_permute_pd(_mm_castsi128_pd(a), 1))));
+    _mm256_store_pd(united_fft[i * 4], b);
+    _mm256_store_pd(united_fft[i * 4 + 2], c);
+  }
+  for (size_t i = lhs.data.size(); i < rhs.data.size(); i++) {
+    __m256d a = uint64_to_double(_mm256_cvtepu16_epi64(_mm_shufflelo_epi16(_mm_cvtsi64_si128(rhs.data[i]), 0b11011000)));
+    __m256d b = _mm256_unpacklo_pd(_mm256_setzero_pd(), a);
+    __m256d c = _mm256_blend_pd(_mm256_setzero_pd(), a, 10);
+    _mm256_store_pd(united_fft[i * 4], b);
+    _mm256_store_pd(united_fft[i * 4 + 2], c);
+  }
+  memzero64(reinterpret_cast<uint64_t*>(united_fft + rhs.data.size() * 4), 2 * (n + 4 - rhs.data.size() * 4));
+
+  // Parallel FFT for lhs and rhs
+  fft_cooley_tukey(united_fft, N_POW);
+
+  // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i
+  // q(x)) by using the fact that p(x) and q(x) have real coefficients, so
+  // that we only perform half the work
+  Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2 + 4];  // CT4 reads out of bounds
 
   // Disentangle real and imaginary values into values of lhs & rhs at roots
   // of unity, and then compute FFT of the product as pointwise product of
   // values of lhs and rhs at roots of unity
 
-  auto r = reverse_mixed_radix_const256<N_POW>(_mm256_set_epi32(0, 0, 0, 0, 0, 0, n / 2, 1));
+  auto r = reverse_mixed_radix<N_POW>(_mm256_set_epi32(0, 0, 0, 0, 0, 0, n / 2, 1));
   const size_t united_fft_one = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
   const size_t united_fft_half_n = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
 
@@ -879,7 +870,7 @@ void mul_united_fft_to_short_fft(Complex *united_fft, Complex *short_fft) {
   // As we have free slots, spend them for prefetch
   __m256i query = _mm256_set_epi32(0, n / 2 - 4 - 1, n / 2 - 4, 4, 0, n / 2 - 1, n / 2, 0);
   for (size_t i = 0; i < n / 2; i += 2) {
-    auto r = reverse_mixed_radix_const256<N_POW>(query);
+    auto r = reverse_mixed_radix<N_POW>(query);
 
     auto ai0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
     auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
@@ -922,74 +913,28 @@ void mul_united_fft_to_short_fft(Complex *united_fft, Complex *short_fft) {
     __m256d g = _mm256_mul_pd(f, _mm256_set1_pd(0.125));
     _mm256_store_pd(short_fft[i], g);
   }
-}
-
-template <int... Pows>
-void mul_united_fft_to_short_fft_dyn(int n_pow, Complex *united_fft, Complex *short_fft, std::integer_sequence<int, Pows...>) {
-  static constexpr void (*dispatch[])(Complex *, Complex *) = {&mul_united_fft_to_short_fft<FFT_MIN + Pows>...};
-  return dispatch[n_pow - FFT_MIN](united_fft, short_fft);
-}
-void mul_united_fft_to_short_fft_dyn(int n_pow, Complex *united_fft, Complex *short_fft) {
-  mul_united_fft_to_short_fft_dyn(n_pow, united_fft, short_fft, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
-}
-
-BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
-  if (lhs.data.size() > rhs.data.size()) {
-    std::swap(lhs, rhs);
-  }
-
-  int n_pow = get_fft_n_pow(lhs, rhs);
-  size_t n = size_t{1} << n_pow;
-
-  // Split numbers into words
-  // CT4 reads out of bounds; overaligning to a cache line is more efficient wrt. prefetch
-  Complex *united_fft = new (std::align_val_t(64)) Complex[n + 4];
-  const uint16_t *lhs_data = reinterpret_cast<const uint16_t *>(lhs.data.data());
-  const uint16_t *rhs_data = reinterpret_cast<const uint16_t *>(rhs.data.data());
-  for (size_t i = 0; i < lhs.data.size(); i++) {
-    __m128i a = _mm_unpacklo_epi16( _mm_cvtsi64_si128(lhs.data[i]), _mm_cvtsi64_si128(rhs.data[i]));
-    __m256d b = uint64_to_double(_mm256_cvtepu16_epi64(a));
-    __m256d c = uint64_to_double(_mm256_cvtepu16_epi64(_mm_castpd_si128(_mm_permute_pd(_mm_castsi128_pd(a), 1))));
-    _mm256_store_pd(united_fft[i * 4], b);
-    _mm256_store_pd(united_fft[i * 4 + 2], c);
-  }
-  for (size_t i = lhs.data.size(); i < rhs.data.size(); i++) {
-    __m256d a = uint64_to_double(_mm256_cvtepu16_epi64(_mm_shufflelo_epi16(_mm_cvtsi64_si128(rhs.data[i]), 0b11011000)));
-    __m256d b = _mm256_unpacklo_pd(_mm256_setzero_pd(), a);
-    __m256d c = _mm256_blend_pd(_mm256_setzero_pd(), a, 10);
-    _mm256_store_pd(united_fft[i * 4], b);
-    _mm256_store_pd(united_fft[i * 4 + 2], c);
-  }
-  memzero64(reinterpret_cast<uint64_t*>(united_fft + rhs.data.size() * 4), 2 * (n + 4 - rhs.data.size() * 4));
-
-  // Parallel FFT for lhs and rhs
-  auto united_fft_access = fft_cooley_tukey(united_fft, n_pow);
-
-  // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i
-  // q(x)) by using the fact that p(x) and q(x) have real coefficients, so
-  // that we only perform half the work
-  Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2 + 4];  // CT4 reads out of bounds
-
-  mul_united_fft_to_short_fft_dyn(n_pow, united_fft, short_fft);
 
   ::operator delete[](united_fft, std::align_val_t(64));
 
-  auto short_fft_access = fft_cooley_tukey(short_fft, n_pow - 1);
+  fft_cooley_tukey(short_fft, N_POW - 1);
 
   BigInt result;
-  result.data.increase_size(size_t{1} << (n_pow - 2));
+  result.data.increase_size(size_t{1} << (N_POW - 2));
 
   uint64_t carry = 0;
   __m256d max_error_vec = _mm256_setzero_pd();
 
+  __m128i query2 = _mm_set_epi32(n / 2 - 8 - 1, n / 2 - 8, n / 2 - 1, n / 2);
   for (size_t i = 0; i < n / 2; i += 2) {
-    size_t ni0 = i == 0 ? 0 : n / 2 - i;
-    size_t ni1 = n / 2 - i - 1;
-    auto [ani0, ani1, ani08, ani18] =
-        short_fft_access(ni0, ni1, ni0 - 8, ni1 - 8);
+    auto r = reverse_mixed_radix<N_POW - 1>(_mm256_castsi128_si256(query2));
+    auto ani0 = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
+    auto ani1 = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+    auto ani0_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
+    auto ani1_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
+    query2 = _mm_sub_epi32(query2, _mm_set1_epi32(2));
 
-    __builtin_prefetch(short_fft[ani08]);
-    __builtin_prefetch(short_fft[ani18]);
+    __builtin_prefetch(short_fft[ani0_prefetch]);
+    __builtin_prefetch(short_fft[ani1_prefetch]);
 
     __m128d z0 = _mm_load_pd(short_fft[ani0]);
     __m128d z1 = _mm_load_pd(short_fft[ani1]);
@@ -1037,6 +982,23 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
          result.data.size() == lhs.data.size() + rhs.data.size() - 1);
 
   return result;
+}
+
+template <int... Pows>
+BigInt mul_fft_dyn(int n_pow, ConstRef lhs, ConstRef rhs, std::integer_sequence<int, Pows...>) {
+  static constexpr BigInt (*dispatch[])(ConstRef, ConstRef) = {&mul_fft_fixed<FFT_MIN + Pows>...};
+  return dispatch[n_pow - FFT_MIN](lhs, rhs);
+}
+BigInt mul_fft_dyn(int n_pow, ConstRef lhs, ConstRef rhs) {
+  return mul_fft_dyn(n_pow, lhs, rhs, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+}
+
+BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
+  if (lhs.data.size() > rhs.data.size()) {
+    std::swap(lhs, rhs);
+  }
+  int n_pow = get_fft_n_pow(lhs, rhs);
+  return mul_fft_dyn(n_pow, lhs, rhs);
 }
 
 BigInt::BigInt(SmallVec data) : data(data) {}
