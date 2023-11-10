@@ -795,11 +795,6 @@ void fft_cooley_tukey(Complex *data, int n_pow) {
 
 // Credits to https://stackoverflow.com/a/41148578
 // Only work for inputs in the range: [0, 2^52)
-__m256i double_to_uint64(__m256d x) {
-  x = _mm256_add_pd(x, _mm256_set1_pd(0x0010000000000000));
-  return _mm256_castpd_si256(
-      _mm256_xor_pd(x, _mm256_set1_pd(0x0010000000000000)));
-}
 __m256d uint64_to_double(__m256i x) {
   auto y = _mm256_castsi256_pd(x);
   y = _mm256_or_pd(y, _mm256_set1_pd(0x0010000000000000));
@@ -922,9 +917,8 @@ BigInt mul_fft_fixed(ConstRef lhs, ConstRef rhs) {
   result.data.increase_size(size_t{1} << (N_POW - 2));
 
   uint64_t carry = 0;
-  __m256d max_error_vec = _mm256_setzero_pd();
 
-  __m128i query2 = _mm_set_epi32(n / 2 - 8 - 1, n / 2 - 8, n / 2 - 1, n / 2);
+  __m128i query2 = _mm_set_epi32(n / 2 - 4 - 1, n / 2 - 4, n / 2 - 1, n / 2);
   for (size_t i = 0; i < n / 2; i += 2) {
     auto r = reverse_mixed_radix<N_POW - 1>(_mm256_castsi128_si256(query2));
     auto ani0 = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
@@ -940,35 +934,20 @@ BigInt mul_fft_fixed(ConstRef lhs, ConstRef rhs) {
     __m128d z1 = _mm_load_pd(short_fft[ani1]);
     __m256d z01 = _mm256_set_m128d(z1, z0);
 
-    __m256d fp_value =
-        _mm256_mul_pd(z01, _mm256_set1_pd(2. / static_cast<double>(n)));
-    __m256i value = double_to_uint64(fp_value);
-    __m256d error = _mm256_andnot_pd(
-        _mm256_set1_pd(-0.), _mm256_sub_pd(fp_value, uint64_to_double(value)));
-    max_error_vec = _mm256_max_pd(max_error_vec, error);
-    __uint128_t tmp = (carry + static_cast<uint64_t>(value[0]) +
-                       ((static_cast<uint64_t>(value[1]) +
-                         ((static_cast<uint64_t>(value[2]) +
-                           (static_cast<__uint128_t>(value[3]) << 16))
-                          << 16))
-                        << 16));
+    // Convert z01 to integer, dividing it by n/2 in the process
+    __m256d shift_const = _mm256_set1_pd(static_cast<double>(0x0010000000000000) * (n / 2));
+    __m256i value = _mm256_castpd_si256(_mm256_xor_pd(_mm256_add_pd(z01, shift_const), shift_const));
+
+    __uint128_t tmp = static_cast<uint64_t>(value[3]);
+    tmp = (tmp << 16) + static_cast<uint64_t>(value[2]);
+    tmp = (tmp << 16) + static_cast<uint64_t>(value[1]);
+    tmp = (tmp << 16) + static_cast<uint64_t>(value[0]);
+    tmp += carry;
     result.data[i / 2] = static_cast<uint64_t>(tmp);
     carry = static_cast<uint64_t>(tmp >> 64);
   }
 
   ::operator delete[](short_fft, std::align_val_t(32));
-
-  __m128d max_error_vec128 =
-      _mm_max_pd(_mm256_castpd256_pd128(max_error_vec),
-                 _mm256_extractf128_pd(max_error_vec, 1));
-  double max_error = std::max(_mm_cvtsd_f64(max_error_vec128),
-                              _mm_cvtsd_f64(_mm_castsi128_pd(_mm_srli_si128(
-                                  _mm_castpd_si128(max_error_vec128), 8))));
-
-  // if (max_error >= 0.05) {
-  //   std::cerr << max_error << " " << n_pow << std::endl;
-  // }
-  ensure(max_error < 0.4);
 
   if (carry > 0) {
     result.data.push_back(carry);
