@@ -893,6 +893,7 @@ BigInt mul_fft_fixed(ConstRef lhs, ConstRef rhs) {
     __builtin_prefetch(united_fft[ai1b_prefetch]);
     __builtin_prefetch(united_fft[ani0b_prefetch]);
     __builtin_prefetch(united_fft[ani1b_prefetch]);
+    __builtin_prefetch(twiddles_cur[i + 4]);  // I have no idea why, but this significantly reduces cache misses
 
     query = _mm256_add_epi32(query, _mm256_set_epi32(0, -2, -2, 2, 0, -2, -2, 2));
 
