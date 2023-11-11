@@ -805,180 +805,413 @@ int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
   return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size() - 1) * 4 - 1);
 }
 
-template <int N_POW>
-BigInt mul_fft_fixed(ConstRef lhs, ConstRef rhs) {
-  const size_t n = size_t{1} << N_POW;
+void fft_dif() {
 
-  // Split numbers into words
-  // CT4 reads out of bounds; overaligning to a cache line is more efficient wrt. prefetch
-  Complex *united_fft = new (std::align_val_t(64)) Complex[n + 4];
-  const uint16_t *lhs_data = reinterpret_cast<const uint16_t *>(lhs.data.data());
-  const uint16_t *rhs_data = reinterpret_cast<const uint16_t *>(rhs.data.data());
-  for (size_t i = 0; i < lhs.data.size(); i++) {
-    __m128i a = _mm_unpacklo_epi16( _mm_cvtsi64_si128(lhs.data[i]), _mm_cvtsi64_si128(rhs.data[i]));
-    __m256d b = uint64_to_double(_mm256_cvtepu16_epi64(a));
-    __m256d c = uint64_to_double(_mm256_cvtepu16_epi64(_mm_castpd_si128(_mm_permute_pd(_mm_castsi128_pd(a), 1))));
-    _mm256_store_pd(united_fft[i * 4], b);
-    _mm256_store_pd(united_fft[i * 4 + 2], c);
+}
+
+Complex* mul_fft_transform_input(ConstRef input, int n_pow) {
+  size_t n = size_t{1} << n_pow;
+
+  // CT4 reads out of bounds, so add + 2
+  Complex *input_fft = new (std::align_val_t(32)) Complex[n / 2 + 2];
+
+  // Split into 16-bit words
+  const uint16_t *data = reinterpret_cast<const uint16_t *>(input.data.data());
+  for (size_t i = 0; i < input.data.size() * 4; i++) {
+    input_fft[i][0] = static_cast<double>(data[i]);
+    input_fft[i][1] = 0;
   }
-  for (size_t i = lhs.data.size(); i < rhs.data.size(); i++) {
-    __m256d a = uint64_to_double(_mm256_cvtepu16_epi64(_mm_shufflelo_epi16(_mm_cvtsi64_si128(rhs.data[i]), 0b11011000)));
-    __m256d b = _mm256_unpacklo_pd(_mm256_setzero_pd(), a);
-    __m256d c = _mm256_blend_pd(_mm256_setzero_pd(), a, 10);
-    _mm256_store_pd(united_fft[i * 4], b);
-    _mm256_store_pd(united_fft[i * 4 + 2], c);
+  for (size_t i = input.data.size() * 4; i < n / 2 + 2; i++) {
+    input_fft[i][0] = 0;
+    input_fft[i][1] = 0;
   }
-  memzero64(reinterpret_cast<uint64_t*>(united_fft + rhs.data.size() * 4), 2 * (n + 4 - rhs.data.size() * 4));
 
-  // Parallel FFT for lhs and rhs
-  fft_cooley_tukey(united_fft, N_POW);
+  fft_dif(input_fft, n_pow);
 
-  // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i
-  // q(x)) by using the fact that p(x) and q(x) have real coefficients, so
-  // that we only perform half the work
-  Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2 + 4];  // CT4 reads out of bounds
+  return input_fft;
+}
 
-  // Disentangle real and imaginary values into values of lhs & rhs at roots
-  // of unity, and then compute FFT of the product as pointwise product of
-  // values of lhs and rhs at roots of unity
+Complex* mul_fft_middle_end(Complex *lhs_fft_dif, Complex *rhs_fft_dif, int n_pow) {
+  size_t n = size_t{1} << n_pow;
 
-  auto r = reverse_mixed_radix<N_POW>(_mm256_set_epi32(0, 0, 0, 0, 0, 0, n / 2, 1));
-  const size_t united_fft_one = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
-  const size_t united_fft_half_n = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+  // CT4 reads out of bounds, so add + 2
+  Complex *prod_fft_dif = new (std::align_val_t(32)) Complex[n / 2 + 2];
 
-  auto get_long_fft_times4 = [&](size_t ai0, size_t ai1, size_t ani0, size_t ani1) {
-    __m128d z0 = _mm_load_pd(united_fft[ai0]);
-    __m128d z1 = _mm_load_pd(united_fft[ai1]);
-    __m256d z01 = _mm256_set_m128d(z1, z0);
-    __m128d nz0 = _mm_load_pd(united_fft[ani0]);
-    __m128d nz1 = _mm_load_pd(united_fft[ani1]);
-    __m256d nz01 = _mm256_set_m128d(nz1, nz0);
-    __m256d a = _mm256_add_pd(z01, nz01);
-    __m256d b = _mm256_sub_pd(z01, nz01);
-    __m256d c = _mm256_blend_pd(a, b, 10);
-    __m256d d = _mm256_permute_pd(a, 15);
-    __m256d g = _mm256_mul_pd(_mm256_permute_pd(c, 5), _mm256_movedup_pd(b));
-    return _mm256_fmsubadd_pd(c, d, g);
+  auto handle_iteration = [&](size_t k, size_t k_complement) {
+    Complex lhs_k = lhs_fft_dif[k];
+    Complex rhs_k = rhs_fft_dif[k];
+    Complex lhs_k_complement = lhs_fft_dif[k_complement];
+    Complex rhs_k_complement = rhs_fft_dif[k_complement];
+    Complex one_plus_twiddles_div_4_k = one_plus_twiddles_div_4_bitreversed[k];
+    Complex result_k = prod_fft_dif[k];
+    // lhs_k * rhs_k - one_plus_twiddles_div_4_bitreversed[k] * (lhs_k - lhs_k_complement.conj()) * (rhs_k - rhs_k_complement.conj())
+
+    double a_real = lhs_k[0] - lhs_k_complement[0];
+    double a_imag = lhs_k[1] + lhs_k_complement[1];
+    double b_real = rhs_k[0] - rhs_k_complement[0];
+    double b_imag = rhs_k[1] + rhs_k_complement[1];
+    double c_real = a_real * b_real - a_imag * b_imag;
+    double c_imag = a_real * b_imag + a_imag * b_real;
+
+    result_k[0] = (
+      (lhs_k[0] * rhs_k[0] - lhs_k[1] * rhs_k[1])
+      - (one_plus_twiddles_div_4_k[0] * c_real - one_plus_twiddles_div_4_k[1] * c_imag)
+    );
+    result_k[1] = (
+      (lhs_k[0] * rhs_k[1] + lhs_k[1] * rhs_k[0])
+      - (one_plus_twiddles_div_4_k[0] * c_imag + one_plus_twiddles_div_4_k[1] * c_real)
+    );
   };
 
-  auto twiddles_cur = twiddles + n;
-  // As we have free slots, spend them for prefetch
-  __m256i query = _mm256_set_epi32(0, n / 2 - 4 - 1, n / 2 - 4, 4, 0, n / 2 - 1, n / 2, 0);
-  for (size_t i = 0; i < n / 2; i += 2) {
-    auto r = reverse_mixed_radix<N_POW>(query);
-
-    auto ai0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
-    auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
-    auto ani1b = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
-    auto ai1a = ai0a + united_fft_one;
-    auto ai0b = ai0a + united_fft_half_n;
-    auto ai1b = ai0b + united_fft_one;
-    auto ani0a = i == 0 ? 0 : ani0b + united_fft_half_n;
-    auto ani1a = ani1b + united_fft_half_n;
-
-    auto ai0a_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 4));
-    auto ani0b_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 5));
-    auto ani1b_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 6));
-    auto ai1a_prefetch = ai0a_prefetch + united_fft_one;
-    // ai0b_prefetch is in the same cache line as ai0a_prefetch
-    auto ai1b_prefetch = ai0a_prefetch + united_fft_half_n + united_fft_one;
-    // although these are close, they are in a different cache line
-    auto ani0a_prefetch = ani0b_prefetch + united_fft_half_n;
-    auto ani1a_prefetch = ani1b_prefetch + united_fft_half_n;
-
-    __builtin_prefetch(united_fft[ai0a_prefetch]);
-    __builtin_prefetch(united_fft[ai1a_prefetch]);
-    __builtin_prefetch(united_fft[ani0a_prefetch]);
-    __builtin_prefetch(united_fft[ani1a_prefetch]);
-    __builtin_prefetch(united_fft[ai1b_prefetch]);
-    __builtin_prefetch(united_fft[ani0b_prefetch]);
-    __builtin_prefetch(united_fft[ani1b_prefetch]);
-    __builtin_prefetch(twiddles_cur[i + 4]);  // I have no idea why, but this significantly reduces cache misses
-
-    query = _mm256_add_epi32(query, _mm256_set_epi32(0, -2, -2, 2, 0, -2, -2, 2));
-
-    __m256d a = get_long_fft_times4(ai0a, ai1a, ani0a, ani1a);
-    __m256d b = get_long_fft_times4(ai0b, ai1b, ani0b, ani1b);
-    __m256d c = _mm256_add_pd(a, b);
-    __m256d d = _mm256_sub_pd(a, b);
-    __m256d e = _mm256_permute_pd(d, 5);
-    __m256d w = _mm256_load_pd(twiddles_cur[i]);
-    __m256d w0 = _mm256_movedup_pd(w);
-    __m256d w1 = _mm256_permute_pd(w, 15);
-    __m256d f = _mm256_fmaddsub_pd(w1, d, _mm256_fmaddsub_pd(w0, e, c));
-    __m256d g = _mm256_mul_pd(f, _mm256_set1_pd(0.125));
-    _mm256_store_pd(short_fft[i], g);
+  handle_iteration(0, 0);
+  for (int j = 0; j < n_pow - 1; j++) {
+    for (size_t k = (size_t{1} << j); k < (size_t{2} << j); k++) {
+      size_t k_complement = (size_t{3} << j) - 1 - k;
+      handle_iteration(k, k_complement);
+    }
   }
 
-  ::operator delete[](united_fft, std::align_val_t(64));
-
-  fft_cooley_tukey(short_fft, N_POW - 1);
-
-  BigInt result;
-  result.data.increase_size(size_t{1} << (N_POW - 2));
-
-  uint64_t carry = 0;
-
-  __m128i query2 = _mm_set_epi32(n / 2 - 4 - 1, n / 2 - 4, n / 2 - 1, n / 2);
-  for (size_t i = 0; i < n / 2; i += 2) {
-    auto r = reverse_mixed_radix<N_POW - 1>(_mm256_castsi128_si256(query2));
-    auto ani0 = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
-    auto ani1 = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
-    auto ani0_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
-    auto ani1_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
-    query2 = _mm_sub_epi32(query2, _mm_set1_epi32(2));
-
-    __builtin_prefetch(short_fft[ani0_prefetch]);
-    __builtin_prefetch(short_fft[ani1_prefetch]);
-
-    __m128d z0 = _mm_load_pd(short_fft[ani0]);
-    __m128d z1 = _mm_load_pd(short_fft[ani1]);
-    __m256d z01 = _mm256_set_m128d(z1, z0);
-
-    // Convert z01 to integer, dividing it by n/2 in the process
-    __m256d shift_const = _mm256_set1_pd(static_cast<double>(0x0010000000000000) * (n / 2));
-    __m256i value = _mm256_castpd_si256(_mm256_xor_pd(_mm256_add_pd(z01, shift_const), shift_const));
-
-    __uint128_t tmp = static_cast<uint64_t>(value[3]);
-    tmp = (tmp << 16) + static_cast<uint64_t>(value[2]);
-    tmp = (tmp << 16) + static_cast<uint64_t>(value[1]);
-    tmp = (tmp << 16) + static_cast<uint64_t>(value[0]);
-    tmp += carry;
-    result.data[i / 2] = static_cast<uint64_t>(tmp);
-    carry = static_cast<uint64_t>(tmp >> 64);
-  }
-
-  ::operator delete[](short_fft, std::align_val_t(32));
-
-  if (carry > 0) {
-    result.data.push_back(carry);
-  } else {
-    result._normalize_nonzero();
-  }
-
-  // std::cerr << lhs.data.size() + rhs.data.size() << " -> " <<
-  // result.data.size() << std::endl;
-  ensure(result.data.size() == lhs.data.size() + rhs.data.size() ||
-         result.data.size() == lhs.data.size() + rhs.data.size() - 1);
-
-  return result;
+  return prod_fft_dif;
 }
 
-template <int... Pows>
-BigInt mul_fft_dyn(int n_pow, ConstRef lhs, ConstRef rhs, std::integer_sequence<int, Pows...>) {
-  static constexpr BigInt (*dispatch[])(ConstRef, ConstRef) = {&mul_fft_fixed<FFT_MIN + Pows>...};
-  return dispatch[n_pow - FFT_MIN](lhs, rhs);
-}
-BigInt mul_fft_dyn(int n_pow, ConstRef lhs, ConstRef rhs) {
-  return mul_fft_dyn(n_pow, lhs, rhs, std::make_integer_sequence<int, FFT_MAX - FFT_MIN + 1>());
+Complex* mul_fft_transform_output(Complex *prod_fft_dif, int n_pow) {
+  size_t n = size_t{1} << n_pow;
+
+  fft_dit(prod_fft_dif, n_pow - 1);
+
+  for (size_t k = 0; k < n / 2; k++) {
+    size_t k1 = k == 0 ? 0 : n / 2 - k;
+    prod_fft_dif[k1][0] * (static_cast<double>(2) / n)
+    prod_fft_dif[k1][1] * (static_cast<double>(2) / n)
+  }
+
+  //     Pr_{2k}   = Re Qr_k = Re Qr_{-k} * 2/n
+  //     Pr_{2k+1} = Im Qr_k = Im Qr_{-k} * 2/n
+
 }
 
 BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
-  if (lhs.data.size() > rhs.data.size()) {
-    std::swap(lhs, rhs);
-  }
+  // We use a trick to compute n-sized FFT of real-valued input using a single n/2-sized FFT as
+  // follows.
+  //
+  // Suppose
+  //     P(x) = p_0 + p_1 x + p_2 x^2 + ... + p_{n-1} x^{n-1}
+  // has real coefficients. Let
+  //     E(x) = p_0 + p_2 x + p_4 x^2 + ... + p_{n-2} x^{n/2-1}
+  //     O(x) = p_1 + p_3 x + p_5 x^2 + ... + p_{n-1} x^{n/2-1},
+  // then
+  //     P(x) = E(x^2) + x O(x^2).
+  // For
+  //     w_n^k = e^{2pi i k / n},
+  // we have
+  //     P(w_n^k) = E(w_n^{2k}) + w_n^k O(w_n^{2k}) = E(w_{n/2}^k) + w_n^k O(w_{n/2}^k).
+  // Therefore,
+  //     FFT[P]_k = FFT[E]_k + w_n^k FFT[O]_k,
+  // where FFT is assumed to output a cyclic array.
+  //
+  // On the other hand, let
+  //     Q(x) = E(x) + i O(x).
+  // By linearity of Fourier transform, we have
+  //     FFT[Q]_k = FFT[E]_k + i FFT[O]_k.
+  // As E(x) and O(x) have real coefficients, we have conj(E(x)) = E(conj(x)) and an identical
+  // formula for O(x). Therefore,
+  //     FFT[E]_{-k} = conj(FFT[E]_k)
+  //     FFT[O]_{-k} = conj(FFT[O]_k),
+  // which implies
+  //     FFT[E]_{-k} + i FFT[O]_{-k} = conj(FFT[E]_k) + i conj(FFT[O]_k)
+  // Rewriting this as
+  //     conj(FFT[Q]_{-k}) = FFT[E]_k - i FFT[O]_k,
+  // we obtain the following formulae:
+  //     FFT[E]_k = (FFT[Q]_k + conj(FFT[Q]_{-k})) / 2
+  //     FFT[O]_k = (FFT[Q]_k - conj(FFT[Q]_{-k})) / 2i
+  //
+  // Substituting this into the formula for FFT[P], we get
+  //     FFT[P]_k = (FFT[Q]_k + conj(FFT[Q]_{-k}) - i w_n^k (FFT[Q]_k - conj(FFT[Q]_{-k}))) / 2
+  //              = ((1 - i w_n^k) FFT[Q]_k + (1 + i w_n^k) conj(FFT[Q]_{-k})) / 2
+  //
+  // Clearly, FFT[Q] can be computed from FFT[P] as well. As
+  //     FFT[P]_k = FFT[E]_k + w_n^k FFT[O]_k,
+  // we also have
+  //     FFT[P]_{k+n/2} = FFT[E]_{k+n/2} + w_n^{k+n/2} FFT[O]_{k+n/2},
+  // but both FFT[E] and FFT[O] have a period of only n/2, so
+  //     FFT[P]_{k+n/2} = FFT[E]_k - w_n^k FFT[O]_k,
+  // which implies
+  //     FFT[E]_k = (FFT[P]_k + FFT[P]_{k+n/2}) / 2
+  //     FFT[O]_k = (FFT[P]_k - FFT[P]_{k+n/2}) w_n^{-k} / 2,
+  // and therefore
+  //     FFT[Q]_k = (FFT[P]_k + FFT[P]_{k+n/2} + i w_n^{-k} (FFT[P]_k - FFT[P]_{k+n/2})) / 2
+  //
+  // Note how similar this forward formula looks to the backward formula.
+  //
+  // Suppose now we have two polynomials P1(x) and P2(x) and want to compute their product
+  // Pr(x) = P1(x) * P2(x) by doing the following steps:
+  // 1. Transform P1(x) and P2(x) to Q1(x) and Q2(x)
+  // 2. Compute FFT[Q1] and FFT[Q2]
+  // 3. Transform FFT[Q1] and FFT[Q2] to FFT[P1] and FFT[P2]
+  // 4. Obtain FFT[Pr] by pointwise multiplication
+  // 5. Transform FFT[Pr] to FFT[Qr]
+  // 6. Compute IFFT[FFT[Qr]] = Qr(x)
+  // 7. Transform Qr(x) to Pr(x)
+  //
+  // For steps 3-4, we have
+  //     FFT[Pr]_k = FFT[P1]_k * FFT[P2]_k
+  //               = ((1 - i w_n^k) FFT[Q1]_k + (1 + i w_n^k) conj(FFT[Q1]_{-k})) / 2 *
+  //                 ((1 - i w_n^k) FFT[Q2]_k + (1 + i w_n^k) conj(FFT[Q2]_{-k})) / 2
+  //               = (
+  //                     (1 - i w_n^k)^2 FFT[Q1]_k FFT[Q2]_k
+  //                     + (1 + w_{n/2}^k) FFT[Q1]_k conj(FFT[Q2]_{-k})
+  //                     + (1 + w_{n/2}^k) conj(FFT[Q1]_{-k}) FFT[Q2]_k
+  //                     + (1 + i w_n^k)^2 conj(FFT[Q1]_{-k}) conj(FFT[Q2]_{-k})
+  //                 ) / 4,
+  // which also translates to
+  //     FFT[Pr]_{k+n/2} = (
+  //                           (1 + i w_n^k)^2 FFT[Q1]_k FFT[Q2]_k
+  //                           + (1 + w_{n/2}^k) FFT[Q1]_k conj(FFT[Q2]_{-k})
+  //                           + (1 + w_{n/2}^k) conj(FFT[Q1]_{-k}) FFT[Q2]_k
+  //                           + (1 - i w_n^k)^2 conj(FFT[Q1]_{-k}) conj(FFT[Q2]_{-k})
+  //                       ) / 4
+  // Therefore, for the sum and difference of the above we obtain
+  //     FFT[Pr]_k + FFT[Pr]_{k+n/2} = (
+  //                                       (1 - w_{n/2}^k) FFT[Q1]_k FFT[Q2]_k
+  //                                       + (1 + w_{n/2}^k) FFT[Q1]_k conj(FFT[Q2]_{-k})
+  //                                       + (1 + w_{n/2}^k) conj(FFT[Q1]_{-k}) FFT[Q2]_k
+  //                                       + (1 - w_{n/2}^k) conj(FFT[Q1]_{-k}) conj(FFT[Q2]_{-k})
+  //                                   ) / 2,
+  //     FFT[Pr]_k - FFT[Pr]_{k+n/2} = i w_n^k (
+  //                                       conj(FFT[Q1]_{-k}) conj(FFT[Q2]_{-k})
+  //                                       - FFT[Q1]_k FFT[Q2]_k
+  //                                   )
+  //
+  // For step 5, we thus have
+  //     FFT[Qr]_k = (
+  //                     (3 - w_{n/2}^k) FFT[Q1]_k FFT[Q2]_k
+  //                     + (1 + w_{n/2}^k) FFT[Q1]_k conj(FFT[Q2]_{-k})
+  //                     + (1 + w_{n/2}^k) conj(FFT[Q1]_{-k}) FFT[Q2]_k
+  //                     - (1 + w_{n/2}^k) conj(FFT[Q1]_{-k}) conj(FFT[Q2]_{-k})
+  //                 ) / 4
+  // This requires 8 complex multiplications to compute, but can be simplified to
+  //     FFT[Qr]_k = FFT[Q1]_k FFT[Q2]_k - (
+  //                     (1 + w_{n/2}^k)
+  //                     * (FFT[Q1]_k - conj(FFT[Q1]_{-k}))
+  //                     * (FFT[Q2]_k - conj(FFT[Q2]_{-k}))
+  //                     / 4
+  //                 ),
+  // which needs only 3 complex multiplications. Why this formula reduced to something this simple
+  // is beyond me.
+  //
+  // Anyway, suppose the functions we actually have are FFT-DIF (decimation in frequency) and
+  // FFT-DIT (decimation in time), where
+  //     FFT-DIF[P]_k = FFT[P]_{bitreverse(k)}
+  //     FFT-DIT[P]_k = FFT[sum_j P_{bitreverse(j)} x^j]_k
+  // These functions are both easier to compute than FFT. They also form inverses, in a way:
+  //     FFT-DIT[FFT-DIF[P]]_k = FFT[FFT[P]]_k = n P_{-k}
+  // The other way to compose them does not work out as nicely:
+  //     FFT-DIF[FFT-DIT[P]]_k = n P_{bitreverse(-bitreverse(k))}
+  //
+  // Nevertheless, it's useful to consider how cache-efficient it is to access P(x) at indices
+  // bitreverse(-bitreverse(k)) for k = 0, 1, 2... As -x = ~x + 1, we have
+  //     bitreverse(-bitreverse(k)) = bitreverse(bitreverse(~k) + 1),
+  // i.e. incrementing ~k at its highest digit in reverse bitorder (as opposed to classic addition).
+  // For k = 00...01 || A, we have ~k = 11...10 || ~A, so the formula maps k to 00...01 || ~A. Thus,
+  // for each j, the formula reverses the [2^j; 2^{j+1}-1] segment. The sequence is hence:
+  //     0; 1; 3, 2; 7, 6, 5, 4; 15, 14, 13, 12, 11, 10, 9, 8; ...
+  // This also gives a way to interate through k and obtain the index without any additional
+  // computations. As there are O(log n) such segments, there should only be O(log n) cache misses
+  // before the predictor aligns to the next segment.
+  //
+  // To utilize the inverse formula, we can rewrite the steps to do the following:
+  // 1. Transform P1(x) and P2(x) to Q1(x) and Q2(x)
+  // 2. Compute FFT-DIF[Q1] and FFT-DIF[Q2]
+  // 3. Transform FFT-DIF[Q1] and FFT-DIF[Q2] to FFT-DIF[P1] and FFT-DIF[P2]
+  // 4. Obtain FFT-DIF[Pr] by pointwise multiplication
+  // 5. Transform FFT-DIF[Pr] to FFT-DIF[Qr]
+  // 6. Compute FFT-DIT[FFT-DIF[Qr]]_k = n/2 * Qr_{-k}
+  // 7. Restore Qr_k from n/2 * Qr_{-k}
+  // 8. Transform Qr(x) to Pr(x)
+  //
+  // Thus steps 3-5 are rewritten like this:
+  //     FFT-DIF[Qr]_k = FFT-DIF[Q1]_k FFT-DIF[Q2]_k - (
+  //                         (1 + w_{n/2}^{bitreverse(k)})
+  //                         * (FFT-DIF[Q1]_k - conj(FFT-DIF[Q1]_{bitreverse(-bitreverse(k))}))
+  //                         * (FFT-DIF[Q2]_k - conj(FFT-DIF[Q2]_{bitreverse(-bitreverse(k))}))
+  //                         / 4
+  //                     )
+  // The formula contains the same access pattern as seen before (bitreverse(-bitreverse(k))),
+  // which, as we are now aware of, incurs O(log n) cache misses, meaning that all steps but the FFT
+  // itself are low-cost.
+  //
+  // Steps 7-8 can be merged into one step:
+  //     Pr_{2k}   = Re Qr_k = Re Qr_{-k} * 2/n
+  //     Pr_{2k+1} = Im Qr_k = Im Qr_{-k} * 2/n
+
   int n_pow = get_fft_n_pow(lhs, rhs);
-  return mul_fft_dyn(n_pow, lhs, rhs);
+
+  Complex *lhs_fft_dif = mul_fft_transform_input(lhs, n_pow);
+  Complex *rhs_fft_dif = mul_fft_transform_input(rhs, n_pow);
+
+  Complex *prod_fft_dif = mul_fft_middle_end(lhs_fft_dif, rhs_fft_dif, n_pow);
+
+  ::operator delete[](lhs_fft_dif, std::align_val_t(32));
+  ::operator delete[](rhs_fft_dif, std::align_val_t(32));
+
+  mul_fft_transform_output(prod_fft_dif, n_pow);
+
+
+  // const size_t n = size_t{1} << N_POW;
+
+  // // Split numbers into words
+  // // CT4 reads out of bounds; overaligning to a cache line is more efficient wrt. prefetch
+  // Complex *united_fft = new (std::align_val_t(64)) Complex[n + 4];
+  // const uint16_t *lhs_data = reinterpret_cast<const uint16_t *>(lhs.data.data());
+  // const uint16_t *rhs_data = reinterpret_cast<const uint16_t *>(rhs.data.data());
+  // for (size_t i = 0; i < lhs.data.size(); i++) {
+  //   __m128i a = _mm_unpacklo_epi16( _mm_cvtsi64_si128(lhs.data[i]), _mm_cvtsi64_si128(rhs.data[i]));
+  //   __m256d b = uint64_to_double(_mm256_cvtepu16_epi64(a));
+  //   __m256d c = uint64_to_double(_mm256_cvtepu16_epi64(_mm_castpd_si128(_mm_permute_pd(_mm_castsi128_pd(a), 1))));
+  //   _mm256_store_pd(united_fft[i * 4], b);
+  //   _mm256_store_pd(united_fft[i * 4 + 2], c);
+  // }
+  // for (size_t i = lhs.data.size(); i < rhs.data.size(); i++) {
+  //   __m256d a = uint64_to_double(_mm256_cvtepu16_epi64(_mm_shufflelo_epi16(_mm_cvtsi64_si128(rhs.data[i]), 0b11011000)));
+  //   __m256d b = _mm256_unpacklo_pd(_mm256_setzero_pd(), a);
+  //   __m256d c = _mm256_blend_pd(_mm256_setzero_pd(), a, 10);
+  //   _mm256_store_pd(united_fft[i * 4], b);
+  //   _mm256_store_pd(united_fft[i * 4 + 2], c);
+  // }
+  // memzero64(reinterpret_cast<uint64_t*>(united_fft + rhs.data.size() * 4), 2 * (n + 4 - rhs.data.size() * 4));
+
+  // // Parallel FFT for lhs and rhs
+  // fft_cooley_tukey(united_fft, N_POW);
+
+  // // Treating long_fft as FFT(p(x^2) + x q(x^2)), convert it to FFT(p(x) + i
+  // // q(x)) by using the fact that p(x) and q(x) have real coefficients, so
+  // // that we only perform half the work
+  // Complex *short_fft = new (std::align_val_t(32)) Complex[n / 2 + 4];  // CT4 reads out of bounds
+
+  // // Disentangle real and imaginary values into values of lhs & rhs at roots
+  // // of unity, and then compute FFT of the product as pointwise product of
+  // // values of lhs and rhs at roots of unity
+
+  // auto r = reverse_mixed_radix<N_POW>(_mm256_set_epi32(0, 0, 0, 0, 0, 0, n / 2, 1));
+  // const size_t united_fft_one = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
+  // const size_t united_fft_half_n = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+
+  // auto get_long_fft_times4 = [&](size_t ai0, size_t ai1, size_t ani0, size_t ani1) {
+  //   __m128d z0 = _mm_load_pd(united_fft[ai0]);
+  //   __m128d z1 = _mm_load_pd(united_fft[ai1]);
+  //   __m256d z01 = _mm256_set_m128d(z1, z0);
+  //   __m128d nz0 = _mm_load_pd(united_fft[ani0]);
+  //   __m128d nz1 = _mm_load_pd(united_fft[ani1]);
+  //   __m256d nz01 = _mm256_set_m128d(nz1, nz0);
+  //   __m256d a = _mm256_add_pd(z01, nz01);
+  //   __m256d b = _mm256_sub_pd(z01, nz01);
+  //   __m256d c = _mm256_blend_pd(a, b, 10);
+  //   __m256d d = _mm256_permute_pd(a, 15);
+  //   __m256d g = _mm256_mul_pd(_mm256_permute_pd(c, 5), _mm256_movedup_pd(b));
+  //   return _mm256_fmsubadd_pd(c, d, g);
+  // };
+
+  // auto twiddles_cur = twiddles + n;
+  // // As we have free slots, spend them for prefetch
+  // __m256i query = _mm256_set_epi32(0, n / 2 - 4 - 1, n / 2 - 4, 4, 0, n / 2 - 1, n / 2, 0);
+  // for (size_t i = 0; i < n / 2; i += 2) {
+  //   auto r = reverse_mixed_radix<N_POW>(query);
+
+  //   auto ai0a = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
+  //   auto ani0b = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+  //   auto ani1b = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
+  //   auto ai1a = ai0a + united_fft_one;
+  //   auto ai0b = ai0a + united_fft_half_n;
+  //   auto ai1b = ai0b + united_fft_one;
+  //   auto ani0a = i == 0 ? 0 : ani0b + united_fft_half_n;
+  //   auto ani1a = ani1b + united_fft_half_n;
+
+  //   auto ai0a_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 4));
+  //   auto ani0b_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 5));
+  //   auto ani1b_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 6));
+  //   auto ai1a_prefetch = ai0a_prefetch + united_fft_one;
+  //   // ai0b_prefetch is in the same cache line as ai0a_prefetch
+  //   auto ai1b_prefetch = ai0a_prefetch + united_fft_half_n + united_fft_one;
+  //   // although these are close, they are in a different cache line
+  //   auto ani0a_prefetch = ani0b_prefetch + united_fft_half_n;
+  //   auto ani1a_prefetch = ani1b_prefetch + united_fft_half_n;
+
+  //   __builtin_prefetch(united_fft[ai0a_prefetch]);
+  //   __builtin_prefetch(united_fft[ai1a_prefetch]);
+  //   __builtin_prefetch(united_fft[ani0a_prefetch]);
+  //   __builtin_prefetch(united_fft[ani1a_prefetch]);
+  //   __builtin_prefetch(united_fft[ai1b_prefetch]);
+  //   __builtin_prefetch(united_fft[ani0b_prefetch]);
+  //   __builtin_prefetch(united_fft[ani1b_prefetch]);
+  //   __builtin_prefetch(twiddles_cur[i + 4]);  // I have no idea why, but this significantly reduces cache misses
+
+  //   query = _mm256_add_epi32(query, _mm256_set_epi32(0, -2, -2, 2, 0, -2, -2, 2));
+
+  //   __m256d a = get_long_fft_times4(ai0a, ai1a, ani0a, ani1a);
+  //   __m256d b = get_long_fft_times4(ai0b, ai1b, ani0b, ani1b);
+  //   __m256d c = _mm256_add_pd(a, b);
+  //   __m256d d = _mm256_sub_pd(a, b);
+  //   __m256d e = _mm256_permute_pd(d, 5);
+  //   __m256d w = _mm256_load_pd(twiddles_cur[i]);
+  //   __m256d w0 = _mm256_movedup_pd(w);
+  //   __m256d w1 = _mm256_permute_pd(w, 15);
+  //   __m256d f = _mm256_fmaddsub_pd(w1, d, _mm256_fmaddsub_pd(w0, e, c));
+  //   __m256d g = _mm256_mul_pd(f, _mm256_set1_pd(0.125));
+  //   _mm256_store_pd(short_fft[i], g);
+  // }
+
+  // ::operator delete[](united_fft, std::align_val_t(64));
+
+  // fft_cooley_tukey(short_fft, N_POW - 1);
+
+  // BigInt result;
+  // result.data.increase_size(size_t{1} << (N_POW - 2));
+
+  // uint64_t carry = 0;
+
+  // __m128i query2 = _mm_set_epi32(n / 2 - 4 - 1, n / 2 - 4, n / 2 - 1, n / 2);
+  // for (size_t i = 0; i < n / 2; i += 2) {
+  //   auto r = reverse_mixed_radix<N_POW - 1>(_mm256_castsi128_si256(query2));
+  //   auto ani0 = static_cast<uint32_t>(_mm256_extract_epi32(r, 0));
+  //   auto ani1 = static_cast<uint32_t>(_mm256_extract_epi32(r, 1));
+  //   auto ani0_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 2));
+  //   auto ani1_prefetch = static_cast<uint32_t>(_mm256_extract_epi32(r, 3));
+  //   query2 = _mm_sub_epi32(query2, _mm_set1_epi32(2));
+
+  //   __builtin_prefetch(short_fft[ani0_prefetch]);
+  //   __builtin_prefetch(short_fft[ani1_prefetch]);
+
+  //   __m128d z0 = _mm_load_pd(short_fft[ani0]);
+  //   __m128d z1 = _mm_load_pd(short_fft[ani1]);
+  //   __m256d z01 = _mm256_set_m128d(z1, z0);
+
+  //   // Convert z01 to integer, dividing it by n/2 in the process
+  //   __m256d shift_const = _mm256_set1_pd(static_cast<double>(0x0010000000000000) * (n / 2));
+  //   __m256i value = _mm256_castpd_si256(_mm256_xor_pd(_mm256_add_pd(z01, shift_const), shift_const));
+
+  //   __uint128_t tmp = static_cast<uint64_t>(value[3]);
+  //   tmp = (tmp << 16) + static_cast<uint64_t>(value[2]);
+  //   tmp = (tmp << 16) + static_cast<uint64_t>(value[1]);
+  //   tmp = (tmp << 16) + static_cast<uint64_t>(value[0]);
+  //   tmp += carry;
+  //   result.data[i / 2] = static_cast<uint64_t>(tmp);
+  //   carry = static_cast<uint64_t>(tmp >> 64);
+  // }
+
+  // ::operator delete[](short_fft, std::align_val_t(32));
+
+  // if (carry > 0) {
+  //   result.data.push_back(carry);
+  // } else {
+  //   result._normalize_nonzero();
+  // }
+
+  // // std::cerr << lhs.data.size() + rhs.data.size() << " -> " <<
+  // // result.data.size() << std::endl;
+  // ensure(result.data.size() == lhs.data.size() + rhs.data.size() ||
+  //        result.data.size() == lhs.data.size() + rhs.data.size() - 1);
+
+  // return result;
 }
 
 BigInt::BigInt(SmallVec data) : data(data) {}
