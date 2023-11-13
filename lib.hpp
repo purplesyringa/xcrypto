@@ -553,7 +553,7 @@ void ensure_twiddle_factors(int want_n_pow) {
 
 int get_fft_n_pow(ConstRef lhs, ConstRef rhs) {
   // 64-bit words are split into 16-bit words, pairs of which are then merged to complex numbers
-  return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size() - 1) * 4 / 2 - 1);
+  return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 4 / 2 - 1);
 }
 
 std::array<__m256d, 4> transpose(__m256d a0, __m256d a1, __m256d a2, __m256d a3) {
@@ -1096,18 +1096,15 @@ double* mul_fft_middle_end(double* lhs_fft_dif, double* rhs_fft_dif, int n_pow) 
   return prod_fft_dif;
 }
 
-BigInt mul_fft_transform_output(double* prod_fft_dif, int n_pow) {
+void mul_fft_transform_output(Ref result, double* prod_fft_dif, int n_pow) {
   size_t n = 1uz << n_pow;
   __m256d magic = _mm256_set1_pd(0x1p52 * n);
 
   ifft_dif(prod_fft_dif, n_pow);
 
-  BigInt result;
-  result.data.increase_size(n / 2);
-
   uint64_t carry = 0;
 
-  for (size_t k = 0; k < n / 2; k++) {
+  for (size_t k = 0; k < result.data.size(); k++) {
     __m128d fp02 = _mm_load_pd(&prod_fft_dif[2 * k]);
     __m128d fp13 = _mm_load_pd(&prod_fft_dif[2 * k + n]);
     __m256d fp = _mm256_set_m128d(_mm_unpackhi_pd(fp02, fp13), _mm_unpacklo_pd(fp02, fp13));
@@ -1124,13 +1121,11 @@ BigInt mul_fft_transform_output(double* prod_fft_dif, int n_pow) {
   }
 
   ensure(carry == 0);
-  result._normalize_nonzero();
-  return result;
 }
 
 std::ostream& operator<<(std::ostream& out, ConstRef rhs);
 
-BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
+void mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow) {
   // We use a trick to compute n-sized FFT of real-valued input using a single n/2-sized FFT as
   // follows.
   //
@@ -1274,18 +1269,14 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // computations. As there are O(log n) such segments, there should only be O(log n) cache misses
   // before the predictor aligns to the next segment.
 
-  int n_pow = get_fft_n_pow(lhs, rhs);
   ensure_twiddle_factors(n_pow);
   double* lhs_fft_dif = mul_fft_transform_input(lhs, n_pow);
   double* rhs_fft_dif = mul_fft_transform_input(rhs, n_pow);
   double* prod_fft_dif = mul_fft_middle_end(lhs_fft_dif, rhs_fft_dif, n_pow);
   ::operator delete[](lhs_fft_dif, std::align_val_t(32));
   ::operator delete[](rhs_fft_dif, std::align_val_t(32));
-  BigInt result = mul_fft_transform_output(prod_fft_dif, n_pow);
+  mul_fft_transform_output(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow);
   ::operator delete[](prod_fft_dif, std::align_val_t(32));
-  ensure(result.data.size() == lhs.data.size() + rhs.data.size() ||
-         result.data.size() == lhs.data.size() + rhs.data.size() - 1);
-  return result;
 }
 
 BigInt::BigInt(SmallVec data) : data(data) {}
@@ -1686,6 +1677,15 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
   } else if (lhs.data.size() == 1) {
     mul_nx1(result, rhs, lhs.data[0]);
   } else if (std::min(lhs.data.size(), rhs.data.size()) >= 40) {
+    int n_pow = get_fft_n_pow(lhs, rhs);
+    if (n_pow >= FFT_CUTOFF) {
+      // Large enough to be efficient
+      if (n_pow <= FFT_MAX) {
+        // Small enough to be precise
+        mul_fft(result, lhs, rhs, n_pow);
+        return;
+      }
+    }
     if (lhs.data.size() * 2 < rhs.data.size()) {
       mul_disproportional(result, lhs, rhs);
     } else if (rhs.data.size() * 2 < lhs.data.size()) {
@@ -1703,10 +1703,6 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
 BigInt operator*(ConstRef lhs, ConstRef rhs) {
   if (lhs.data.empty() || rhs.data.empty()) {
     return {};
-  }
-  int n_pow = get_fft_n_pow(lhs, rhs);
-  if (n_pow >= FFT_CUTOFF && n_pow <= FFT_MAX) {
-    return mul_fft(lhs, rhs);
   }
   BigInt result;
   result.data.increase_size_zerofill(lhs.data.size() + rhs.data.size());
