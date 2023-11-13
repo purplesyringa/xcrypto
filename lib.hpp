@@ -1552,9 +1552,7 @@ ConstRef mul_to_ref_nonzero(Ref result, ConstRef lhs, ConstRef rhs) {
 void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   __uint128_t product = __uint128_t{lhs.data[0]} * rhs.data[0];
   result.data[0] = static_cast<uint64_t>(product);
-  if (product >= (__uint128_t{1} << 64)) {
-    result.data[1] = static_cast<uint64_t>(product >> 64);
-  }
+  result.data[1] = static_cast<uint64_t>(product >> 64);
 }
 
 void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
@@ -1564,9 +1562,7 @@ void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
     result.data[i] = static_cast<uint64_t>(total);
     carry = static_cast<uint64_t>(total >> 64);
   }
-  if (carry != 0) {
-    result.data[lhs.data.size()] = carry;
-  }
+  result.data[lhs.data.size()] = carry;
 }
 
 __attribute__((noinline)) void mul_quadratic(Ref result, ConstRef lhs,
@@ -1694,7 +1690,7 @@ void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
   BigInt rinf_2 = rinf * 2;
 
   auto half = [](BigInt a) {
-    a.halve();
+    ensure(!a.halve());
     return a;
   };
   auto third = [](BigInt a) {
