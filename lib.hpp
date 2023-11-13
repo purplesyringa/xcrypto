@@ -22,11 +22,11 @@ constexpr void ensure(bool cond) {
   }
 }
 
-void memzero64(uint64_t *data, size_t count) {
+void memzero64(uint64_t* data, size_t count) {
   asm volatile("rep stosq" : "+D"(data), "+c"(count) : "a"(0) : "memory");
 }
 
-void memcpy64(uint64_t *dst, const uint64_t *src, size_t count) {
+void memcpy64(uint64_t* dst, const uint64_t* src, size_t count) {
   asm volatile("rep movsq" : "+D"(dst), "+S"(src), "+c"(count) : : "memory");
 }
 
@@ -39,13 +39,13 @@ class ConstSpan;
 class SmallVec {
   static constexpr size_t INLINE_STORAGE_SIZE = 8;
 
-  uint64_t *_begin;
+  uint64_t* _begin;
   size_t _size;
   size_t _capacity;
   uint64_t _inline_storage[INLINE_STORAGE_SIZE];
 
   void increase_capacity_to(size_t new_capacity) {
-    uint64_t *new_begin = new uint64_t[new_capacity];
+    uint64_t* new_begin = new uint64_t[new_capacity];
     memcpy64(new_begin, _begin, _size);
     if (_begin != _inline_storage) {
       delete[] _begin;
@@ -55,8 +55,7 @@ class SmallVec {
   }
 
 public:
-  SmallVec()
-      : _begin(_inline_storage), _size(0), _capacity(INLINE_STORAGE_SIZE) {}
+  SmallVec() : _begin(_inline_storage), _size(0), _capacity(INLINE_STORAGE_SIZE) {}
   SmallVec(std::initializer_list<uint64_t> list) {
     if (list.size() <= INLINE_STORAGE_SIZE) {
       _begin = _inline_storage;
@@ -68,7 +67,7 @@ public:
     std::copy(list.begin(), list.end(), _begin);
     _size = list.size();
   }
-  SmallVec(const uint64_t *data, size_t size) {
+  SmallVec(const uint64_t* data, size_t size) {
     if (size <= INLINE_STORAGE_SIZE) {
       _begin = _inline_storage;
       _capacity = INLINE_STORAGE_SIZE;
@@ -81,8 +80,8 @@ public:
   }
 
   SmallVec(ConstSpan rhs);
-  SmallVec(const SmallVec &rhs);
-  SmallVec(SmallVec &&rhs) {
+  SmallVec(const SmallVec& rhs);
+  SmallVec(SmallVec&& rhs) {
     if (rhs._begin == rhs._inline_storage) {
       _begin = _inline_storage;
       memcpy64(_begin, rhs._begin, rhs._size);
@@ -96,8 +95,8 @@ public:
     rhs._capacity = 0;
   }
 
-  SmallVec &operator=(ConstSpan rhs);
-  SmallVec &operator=(SmallVec &&rhs) {
+  SmallVec& operator=(ConstSpan rhs);
+  SmallVec& operator=(SmallVec&& rhs) {
     if (_begin != _inline_storage) {
       delete[] _begin;
     }
@@ -150,13 +149,13 @@ public:
   }
   void set_size(size_t size) { _size = size; }
 
-  uint64_t &operator[](size_t i) { return _begin[i]; }
-  const uint64_t &operator[](size_t i) const { return _begin[i]; }
+  uint64_t& operator[](size_t i) { return _begin[i]; }
+  const uint64_t& operator[](size_t i) const { return _begin[i]; }
 
   size_t size() const { return _size; }
   bool empty() const { return _size == 0; }
-  uint64_t *data() { return _begin; }
-  const uint64_t *data() const { return _begin; }
+  uint64_t* data() { return _begin; }
+  const uint64_t* data() const { return _begin; }
 
   void push_back(uint64_t x) {
     if (_size == _capacity) {
@@ -174,112 +173,98 @@ public:
     _capacity = 0;
   }
 
-  bool operator==(const SmallVec &rhs) const {
+  bool operator==(const SmallVec& rhs) const {
     return _size == rhs._size && std::equal(_begin, _begin + _size, rhs._begin);
   }
 
-  uint64_t &back() { return _begin[_size - 1]; }
-  const uint64_t &back() const { return _begin[_size - 1]; }
+  uint64_t& back() { return _begin[_size - 1]; }
+  const uint64_t& back() const { return _begin[_size - 1]; }
 
-  uint64_t *begin() { return _begin; }
-  uint64_t *end() { return _begin + _size; }
-  const uint64_t *begin() const { return _begin; }
-  const uint64_t *end() const { return _begin + _size; }
+  uint64_t* begin() { return _begin; }
+  uint64_t* end() { return _begin + _size; }
+  const uint64_t* begin() const { return _begin; }
+  const uint64_t* end() const { return _begin + _size; }
 
-  std::reverse_iterator<uint64_t *> rbegin() {
+  std::reverse_iterator<uint64_t*> rbegin() { return std::make_reverse_iterator(_begin + _size); }
+  std::reverse_iterator<uint64_t*> rend() { return std::make_reverse_iterator(_begin); }
+  std::reverse_iterator<const uint64_t*> rbegin() const {
     return std::make_reverse_iterator(_begin + _size);
   }
-  std::reverse_iterator<uint64_t *> rend() {
-    return std::make_reverse_iterator(_begin);
-  }
-  std::reverse_iterator<const uint64_t *> rbegin() const {
-    return std::make_reverse_iterator(_begin + _size);
-  }
-  std::reverse_iterator<const uint64_t *> rend() const {
-    return std::make_reverse_iterator(_begin);
-  }
+  std::reverse_iterator<const uint64_t*> rend() const { return std::make_reverse_iterator(_begin); }
 };
 
 class Span {
-  uint64_t *_begin;
+  uint64_t* _begin;
   size_t _size;
 
 public:
   Span() : _begin(nullptr), _size(0) {}
-  Span(uint64_t *data, size_t size) : _begin(data), _size(size) {}
-  Span(SmallVec &vec) : _begin(vec.begin()), _size(vec.size()) {}
+  Span(uint64_t* data, size_t size) : _begin(data), _size(size) {}
+  Span(SmallVec& vec) : _begin(vec.begin()), _size(vec.size()) {}
   void set_size(size_t size) { _size = size; }
 
-  uint64_t &operator[](size_t i) { return _begin[i]; }
-  const uint64_t &operator[](size_t i) const { return _begin[i]; }
+  uint64_t& operator[](size_t i) { return _begin[i]; }
+  const uint64_t& operator[](size_t i) const { return _begin[i]; }
 
   size_t size() const { return _size; }
   bool empty() const { return _size == 0; }
-  uint64_t *data() { return _begin; }
-  const uint64_t *data() const { return _begin; }
+  uint64_t* data() { return _begin; }
+  const uint64_t* data() const { return _begin; }
 
   void pop_back() { _size--; }
 
-  bool operator==(const Span &rhs) const {
+  bool operator==(const Span& rhs) const {
     return _size == rhs._size && std::equal(_begin, _begin + _size, rhs._begin);
   }
 
-  uint64_t &back() { return _begin[_size - 1]; }
+  uint64_t& back() { return _begin[_size - 1]; }
   uint64_t back() const { return _begin[_size - 1]; }
 
-  uint64_t *begin() { return _begin; }
-  uint64_t *end() { return _begin + _size; }
-  const uint64_t *begin() const { return _begin; }
-  const uint64_t *end() const { return _begin + _size; }
+  uint64_t* begin() { return _begin; }
+  uint64_t* end() { return _begin + _size; }
+  const uint64_t* begin() const { return _begin; }
+  const uint64_t* end() const { return _begin + _size; }
 
-  std::reverse_iterator<uint64_t *> rbegin() {
+  std::reverse_iterator<uint64_t*> rbegin() { return std::make_reverse_iterator(_begin + _size); }
+  std::reverse_iterator<uint64_t*> rend() { return std::make_reverse_iterator(_begin); }
+  std::reverse_iterator<const uint64_t*> rbegin() const {
     return std::make_reverse_iterator(_begin + _size);
   }
-  std::reverse_iterator<uint64_t *> rend() {
-    return std::make_reverse_iterator(_begin);
-  }
-  std::reverse_iterator<const uint64_t *> rbegin() const {
-    return std::make_reverse_iterator(_begin + _size);
-  }
-  std::reverse_iterator<const uint64_t *> rend() const {
-    return std::make_reverse_iterator(_begin);
-  }
+  std::reverse_iterator<const uint64_t*> rend() const { return std::make_reverse_iterator(_begin); }
 };
 
 class ConstSpan {
-  const uint64_t *_begin;
+  const uint64_t* _begin;
   size_t _size;
 
 public:
   ConstSpan() : _begin(nullptr), _size(0) {}
-  ConstSpan(const uint64_t *data, size_t size) : _begin(data), _size(size) {}
-  ConstSpan(const SmallVec &vec) : _begin(vec.begin()), _size(vec.size()) {}
+  ConstSpan(const uint64_t* data, size_t size) : _begin(data), _size(size) {}
+  ConstSpan(const SmallVec& vec) : _begin(vec.begin()), _size(vec.size()) {}
   ConstSpan(Span span) : _begin(span.begin()), _size(span.size()) {}
   void set_size(size_t size) { _size = size; }
 
-  const uint64_t &operator[](size_t i) const { return _begin[i]; }
+  const uint64_t& operator[](size_t i) const { return _begin[i]; }
 
   size_t size() const { return _size; }
   bool empty() const { return _size == 0; }
-  const uint64_t *data() const { return _begin; }
+  const uint64_t* data() const { return _begin; }
 
   void pop_back() { _size--; }
 
-  bool operator==(const ConstSpan &rhs) const {
+  bool operator==(const ConstSpan& rhs) const {
     return _size == rhs._size && std::equal(_begin, _begin + _size, rhs._begin);
   }
 
-  const uint64_t &back() const { return _begin[_size - 1]; }
+  const uint64_t& back() const { return _begin[_size - 1]; }
 
-  const uint64_t *begin() const { return _begin; }
-  const uint64_t *end() const { return _begin + _size; }
+  const uint64_t* begin() const { return _begin; }
+  const uint64_t* end() const { return _begin + _size; }
 
-  std::reverse_iterator<const uint64_t *> rbegin() const {
+  std::reverse_iterator<const uint64_t*> rbegin() const {
     return std::make_reverse_iterator(_begin + _size);
   }
-  std::reverse_iterator<const uint64_t *> rend() const {
-    return std::make_reverse_iterator(_begin);
-  }
+  std::reverse_iterator<const uint64_t*> rend() const { return std::make_reverse_iterator(_begin); }
 };
 
 SmallVec::SmallVec(ConstSpan rhs) {
@@ -294,10 +279,9 @@ SmallVec::SmallVec(ConstSpan rhs) {
   _size = rhs.size();
 }
 
-SmallVec::SmallVec(const SmallVec &rhs)
-    : SmallVec(static_cast<ConstSpan>(rhs)) {}
+SmallVec::SmallVec(const SmallVec& rhs) : SmallVec(static_cast<ConstSpan>(rhs)) {}
 
-SmallVec &SmallVec::operator=(ConstSpan rhs) {
+SmallVec& SmallVec::operator=(ConstSpan rhs) {
   if (rhs.size() > _capacity) {
     if (_begin != _inline_storage) {
       delete[] _begin;
@@ -331,26 +315,26 @@ public:
   BigInt(int value);
 
   template <typename List, typename = decltype(std::declval<List>().begin())>
-  BigInt(List &&list, with_base base);
+  BigInt(List&& list, with_base base);
   BigInt(std::string_view s, with_base base = {10});
-  BigInt(const char *s, with_base base = {10});
+  BigInt(const char* s, with_base base = {10});
 
   BigInt(ConstRef rhs);
-  BigInt(const BigInt &rhs);
-  BigInt(BigInt &&rhs);
+  BigInt(const BigInt& rhs);
+  BigInt(BigInt&& rhs);
 
-  BigInt &operator=(ConstRef rhs);
-  BigInt &operator=(BigInt &&rhs);
+  BigInt& operator=(ConstRef rhs);
+  BigInt& operator=(BigInt&& rhs);
 
-  BigInt &operator+=(ConstRef rhs);
-  BigInt &operator-=(ConstRef rhs);
-  BigInt &operator+=(const BigInt &rhs);
-  BigInt &operator-=(const BigInt &rhs);
+  BigInt& operator+=(ConstRef rhs);
+  BigInt& operator-=(ConstRef rhs);
+  BigInt& operator+=(const BigInt& rhs);
+  BigInt& operator-=(const BigInt& rhs);
 
-  BigInt &operator++();
+  BigInt& operator++();
   BigInt operator++(int);
 
-  BigInt &operator--();
+  BigInt& operator--();
   BigInt operator--(int);
 
   uint32_t divmod_inplace(uint32_t rhs);
@@ -369,8 +353,8 @@ public:
   Span data;
 
   Ref(Span data) : data(data) {}
-  Ref(BigInt &bigint) : data(bigint.data) {}
-  Ref(BigInt &&bigint) : data(bigint.data) {}
+  Ref(BigInt& bigint) : data(bigint.data) {}
+  Ref(BigInt&& bigint) : data(bigint.data) {}
 
   Ref slice(size_t l) { return {Span{data.data() + l, data.size() - l}}; }
   Ref slice(size_t l, size_t size) { return {Span{data.data() + l, size}}; }
@@ -391,19 +375,13 @@ public:
   ConstSpan data;
 
   ConstRef(ConstSpan data) : data(data) {}
-  ConstRef(const BigInt &bigint) : data(bigint.data) {}
+  ConstRef(const BigInt& bigint) : data(bigint.data) {}
   ConstRef(Ref ref) : data(ref.data) {}
 
-  ConstRef slice(size_t l) const {
-    return {ConstSpan{data.data() + l, data.size() - l}};
-  }
-  ConstRef slice(size_t l, size_t size) const {
-    return {ConstSpan{data.data() + l, size}};
-  }
+  ConstRef slice(size_t l) const { return {ConstSpan{data.data() + l, data.size() - l}}; }
+  ConstRef slice(size_t l, size_t size) const { return {ConstSpan{data.data() + l, size}}; }
 
-  explicit operator BigInt() const {
-    return {SmallVec{data.data(), data.size()}};
-  }
+  explicit operator BigInt() const { return {SmallVec{data.data(), data.size()}}; }
 
   ConstRef normalized() {
     ConstSpan tmp = data;
@@ -414,20 +392,14 @@ public:
   }
 };
 
-ConstRef Ref::slice(size_t l) const {
-  return static_cast<ConstRef>(*this).slice(l);
-}
+ConstRef Ref::slice(size_t l) const { return static_cast<ConstRef>(*this).slice(l); }
 ConstRef Ref::slice(size_t l, size_t size) const {
   return static_cast<ConstRef>(*this).slice(l, size);
 }
 
 Ref BigInt::slice(size_t l) { return static_cast<Ref>(*this).slice(l); }
-Ref BigInt::slice(size_t l, size_t size) {
-  return static_cast<Ref>(*this).slice(l, size);
-}
-ConstRef BigInt::slice(size_t l) const {
-  return static_cast<ConstRef>(*this).slice(l);
-}
+Ref BigInt::slice(size_t l, size_t size) { return static_cast<Ref>(*this).slice(l, size); }
+ConstRef BigInt::slice(size_t l) const { return static_cast<ConstRef>(*this).slice(l); }
 ConstRef BigInt::slice(size_t l, size_t size) const {
   return static_cast<ConstRef>(*this).slice(l, size);
 }
@@ -519,8 +491,7 @@ void add_to(Ref lhs, ConstRef rhs) {
       "jc 3b;"
       "4:"
       : [offset] "+r"(offset), [value1] "=&r"(value1), [value2] "=&r"(value2),
-        [unrolled_loop_count] "+r"(unrolled_loop_count),
-        [left_loop_count] "+r"(left_loop_count)
+        [unrolled_loop_count] "+r"(unrolled_loop_count), [left_loop_count] "+r"(left_loop_count)
       : [data_ptr] "r"(lhs.data.data()), [rhs_data_ptr] "r"(rhs.data.data())
       : "flags", "memory");
 }
@@ -528,22 +499,22 @@ void add_to(Ref lhs, ConstRef rhs) {
 inline constexpr int FFT_CUTOFF = 11;
 inline constexpr int FFT_MAX = 19;
 
-double *construct_initial_twiddles_bitreversed() {
+double* construct_initial_twiddles_bitreversed() {
   // bitreversed k | length | k | n | 2 pi k / n | cos      | sin
   // 0             | 0      | 0 | 2 | 0          | 1        | 0
   // 1             | 1      | 1 | 4 | pi/2       | 0        | 1
-  return new (std::align_val_t(32)) double[4] {1, 0, 0, 1};
+  return new (std::align_val_t(32)) double[4]{1, 0, 0, 1};
 }
 
-inline double *twiddles_bitreversed = construct_initial_twiddles_bitreversed();
+inline double* twiddles_bitreversed = construct_initial_twiddles_bitreversed();
 inline int twiddles_n_pow = 2;
 
 uint32_t bitreverse(uint32_t k, int n_pow) {
   k <<= 32 - n_pow;
-  k = ((k & 0x55555555) << 1 ) | ((k >> 1 ) & 0x55555555);
-  k = ((k & 0x33333333) << 2 ) | ((k >> 2 ) & 0x33333333);
-  k = ((k & 0x0f0f0f0f) << 4 ) | ((k >> 4 ) & 0x0f0f0f0f);
-  k = ((k & 0x00ff00ff) << 8 ) | ((k >> 8 ) & 0x00ff00ff);
+  k = ((k & 0x55555555) << 1) | ((k >> 1) & 0x55555555);
+  k = ((k & 0x33333333) << 2) | ((k >> 2) & 0x33333333);
+  k = ((k & 0x0f0f0f0f) << 4) | ((k >> 4) & 0x0f0f0f0f);
+  k = ((k & 0x00ff00ff) << 8) | ((k >> 8) & 0x00ff00ff);
   k = ((k & 0x0000ffff) << 16) | ((k >> 16) & 0x0000ffff);
   return k;
 }
@@ -560,10 +531,10 @@ void ensure_twiddle_factors(int want_n_pow) {
   size_t old_n = 1uz << twiddles_n_pow;
   size_t new_n = 1uz << want_n_pow;
   auto new_twiddles_bitreversed = new (std::align_val_t(32)) double[new_n];
-  memcpy64(reinterpret_cast<uint64_t *>(new_twiddles_bitreversed),
-           reinterpret_cast<uint64_t *>(twiddles_bitreversed), old_n / 2);
-  memcpy64(reinterpret_cast<uint64_t *>(new_twiddles_bitreversed) + new_n / 2,
-           reinterpret_cast<uint64_t *>(twiddles_bitreversed + old_n / 2), old_n / 2);
+  memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed),
+           reinterpret_cast<uint64_t*>(twiddles_bitreversed), old_n / 2);
+  memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed) + new_n / 2,
+           reinterpret_cast<uint64_t*>(twiddles_bitreversed + old_n / 2), old_n / 2);
   ::operator delete[](twiddles_bitreversed, std::align_val_t(32));
   twiddles_bitreversed = new_twiddles_bitreversed;
   double coeff = 2 * PI / static_cast<double>(new_n);
@@ -590,15 +561,11 @@ std::array<__m256d, 4> transpose(__m256d a0, __m256d a1, __m256d a2, __m256d a3)
   __m256d b1 = _mm256_unpackhi_pd(a0, a1);
   __m256d b2 = _mm256_unpacklo_pd(a2, a3);
   __m256d b3 = _mm256_unpackhi_pd(a2, a3);
-  return {
-    _mm256_permute2f128_pd(b0, b2, 0x20),
-    _mm256_permute2f128_pd(b1, b3, 0x20),
-    _mm256_permute2f128_pd(b0, b2, 0x31),
-    _mm256_permute2f128_pd(b1, b3, 0x31)
-  };
+  return {_mm256_permute2f128_pd(b0, b2, 0x20), _mm256_permute2f128_pd(b1, b3, 0x20),
+          _mm256_permute2f128_pd(b0, b2, 0x31), _mm256_permute2f128_pd(b1, b3, 0x31)};
 }
 
-void fft_dif(double *a, int n_pow) {
+void fft_dif(double* a, int n_pow) {
   // FFT-DIF is defined by
   //     FFT-DIF[P]_k = FFT[P]_{bitreverse(k)}
   // For
@@ -663,7 +630,8 @@ void fft_dif(double *a, int n_pow) {
       __m256d w2_real = _mm256_set1_pd(twiddles_bitreversed[2 * k]);
       __m256d w2_imag = _mm256_set1_pd(twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
       __m256d w3_real = _mm256_set1_pd(twiddles_bitreversed[2 * k + 1]);
-      __m256d w3_imag = _mm256_set1_pd(twiddles_bitreversed[2 * k + 1 + (1uz << (twiddles_n_pow - 1))]);
+      __m256d w3_imag =
+          _mm256_set1_pd(twiddles_bitreversed[2 * k + 1 + (1uz << (twiddles_n_pow - 1))]);
 
       for (size_t j = (4 * k) << (step - 1); j < ((4 * k + 1) << (step - 1)); j += 4) {
         __m256d a0_real = _mm256_load_pd(&a[j]);
@@ -697,11 +665,14 @@ void fft_dif(double *a, int n_pow) {
         _mm256_store_pd(&a[j], _mm256_add_pd(e2_real, wo2_real));
         _mm256_store_pd(&a[j + imag_offset], _mm256_add_pd(e2_imag, wo2_imag));
         _mm256_store_pd(&a[j + (1uz << (step - 1))], _mm256_sub_pd(e2_real, wo2_real));
-        _mm256_store_pd(&a[j + (1uz << (step - 1)) + imag_offset], _mm256_sub_pd(e2_imag, wo2_imag));
+        _mm256_store_pd(&a[j + (1uz << (step - 1)) + imag_offset],
+                        _mm256_sub_pd(e2_imag, wo2_imag));
         _mm256_store_pd(&a[j + (2uz << (step - 1))], _mm256_add_pd(e3_real, wo3_real));
-        _mm256_store_pd(&a[j + (2uz << (step - 1)) + imag_offset], _mm256_add_pd(e3_imag, wo3_imag));
+        _mm256_store_pd(&a[j + (2uz << (step - 1)) + imag_offset],
+                        _mm256_add_pd(e3_imag, wo3_imag));
         _mm256_store_pd(&a[j + (3uz << (step - 1))], _mm256_sub_pd(e3_real, wo3_real));
-        _mm256_store_pd(&a[j + (3uz << (step - 1)) + imag_offset], _mm256_sub_pd(e3_imag, wo3_imag));
+        _mm256_store_pd(&a[j + (3uz << (step - 1)) + imag_offset],
+                        _mm256_sub_pd(e3_imag, wo3_imag));
       }
     }
   };
@@ -715,26 +686,27 @@ void fft_dif(double *a, int n_pow) {
 
       __m256d w23_real_low = _mm256_load_pd(&twiddles_bitreversed[2 * k]);
       __m256d w23_real_high = _mm256_load_pd(&twiddles_bitreversed[2 * k + 4]);
-      __m256d w2_real = _mm256_permute4x64_pd(_mm256_unpacklo_pd(w23_real_low, w23_real_high), 0b11011000);
-      __m256d w3_real = _mm256_permute4x64_pd(_mm256_unpackhi_pd(w23_real_low, w23_real_high), 0b11011000);
+      __m256d w2_real =
+          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w23_real_low, w23_real_high), 0b11011000);
+      __m256d w3_real =
+          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w23_real_low, w23_real_high), 0b11011000);
 
-      __m256d w23_imag_low = _mm256_load_pd(&twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w23_imag_high = _mm256_load_pd(&twiddles_bitreversed[2 * k + 4 + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w2_imag = _mm256_permute4x64_pd(_mm256_unpacklo_pd(w23_imag_low, w23_imag_high), 0b11011000);
-      __m256d w3_imag = _mm256_permute4x64_pd(_mm256_unpackhi_pd(w23_imag_low, w23_imag_high), 0b11011000);
+      __m256d w23_imag_low =
+          _mm256_load_pd(&twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
+      __m256d w23_imag_high =
+          _mm256_load_pd(&twiddles_bitreversed[2 * k + 4 + (1uz << (twiddles_n_pow - 1))]);
+      __m256d w2_imag =
+          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w23_imag_low, w23_imag_high), 0b11011000);
+      __m256d w3_imag =
+          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w23_imag_low, w23_imag_high), 0b11011000);
 
-      auto [a0_real, a1_real, a2_real, a3_real] = transpose(
-        _mm256_load_pd(&a[4 * k]),
-        _mm256_load_pd(&a[4 * (k + 1)]),
-        _mm256_load_pd(&a[4 * (k + 2)]),
-        _mm256_load_pd(&a[4 * (k + 3)])
-      );
+      auto [a0_real, a1_real, a2_real, a3_real] =
+          transpose(_mm256_load_pd(&a[4 * k]), _mm256_load_pd(&a[4 * (k + 1)]),
+                    _mm256_load_pd(&a[4 * (k + 2)]), _mm256_load_pd(&a[4 * (k + 3)]));
       auto [a0_imag, a1_imag, a2_imag, a3_imag] = transpose(
-        _mm256_load_pd(&a[4 * k + imag_offset]),
-        _mm256_load_pd(&a[4 * (k + 1) + imag_offset]),
-        _mm256_load_pd(&a[4 * (k + 2) + imag_offset]),
-        _mm256_load_pd(&a[4 * (k + 3) + imag_offset])
-      );
+          _mm256_load_pd(&a[4 * k + imag_offset]), _mm256_load_pd(&a[4 * (k + 1) + imag_offset]),
+          _mm256_load_pd(&a[4 * (k + 2) + imag_offset]),
+          _mm256_load_pd(&a[4 * (k + 3) + imag_offset]));
 
       __m256d wa2_real = _mm256_fmsub_pd(w_real, a2_real, _mm256_mul_pd(w_imag, a2_imag));
       __m256d wa2_imag = _mm256_fmadd_pd(w_real, a2_imag, _mm256_mul_pd(w_imag, a2_real));
@@ -755,23 +727,17 @@ void fft_dif(double *a, int n_pow) {
       __m256d wo3_real = _mm256_fmsub_pd(w3_real, o3_real, _mm256_mul_pd(w3_imag, o3_imag));
       __m256d wo3_imag = _mm256_fmadd_pd(w3_real, o3_imag, _mm256_mul_pd(w3_imag, o3_real));
 
-      auto [b0_real, b1_real, b2_real, b3_real] = transpose(
-        _mm256_add_pd(e2_real, wo2_real),
-        _mm256_sub_pd(e2_real, wo2_real),
-        _mm256_add_pd(e3_real, wo3_real),
-        _mm256_sub_pd(e3_real, wo3_real)
-      );
+      auto [b0_real, b1_real, b2_real, b3_real] =
+          transpose(_mm256_add_pd(e2_real, wo2_real), _mm256_sub_pd(e2_real, wo2_real),
+                    _mm256_add_pd(e3_real, wo3_real), _mm256_sub_pd(e3_real, wo3_real));
       _mm256_store_pd(&a[4 * k], b0_real);
       _mm256_store_pd(&a[4 * (k + 1)], b1_real);
       _mm256_store_pd(&a[4 * (k + 2)], b2_real);
       _mm256_store_pd(&a[4 * (k + 3)], b3_real);
 
-      auto [b0_imag, b1_imag, b2_imag, b3_imag] = transpose(
-        _mm256_add_pd(e2_imag, wo2_imag),
-        _mm256_sub_pd(e2_imag, wo2_imag),
-        _mm256_add_pd(e3_imag, wo3_imag),
-        _mm256_sub_pd(e3_imag, wo3_imag)
-      );
+      auto [b0_imag, b1_imag, b2_imag, b3_imag] =
+          transpose(_mm256_add_pd(e2_imag, wo2_imag), _mm256_sub_pd(e2_imag, wo2_imag),
+                    _mm256_add_pd(e3_imag, wo3_imag), _mm256_sub_pd(e3_imag, wo3_imag));
       _mm256_store_pd(&a[4 * k + imag_offset], b0_imag);
       _mm256_store_pd(&a[4 * (k + 1) + imag_offset], b1_imag);
       _mm256_store_pd(&a[4 * (k + 2) + imag_offset], b2_imag);
@@ -812,7 +778,7 @@ void fft_dif(double *a, int n_pow) {
   radix4_low();
 }
 
-void ifft_dif(double *a, int n_pow) {
+void ifft_dif(double* a, int n_pow) {
   // This algorithm is a straightforward reverse of FFT-DIF, except that the result is multiplicated
   // by n:
   //     def IFFT-DIF(A):
@@ -856,7 +822,8 @@ void ifft_dif(double *a, int n_pow) {
       __m256d w0_real = _mm256_set1_pd(twiddles_bitreversed[2 * k]);
       __m256d w0_imag = _mm256_set1_pd(twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
       __m256d w1_real = _mm256_set1_pd(twiddles_bitreversed[2 * k + 1]);
-      __m256d w1_imag = _mm256_set1_pd(twiddles_bitreversed[2 * k + 1 + (1uz << (twiddles_n_pow - 1))]);
+      __m256d w1_imag =
+          _mm256_set1_pd(twiddles_bitreversed[2 * k + 1 + (1uz << (twiddles_n_pow - 1))]);
 
       for (size_t j = (4 * k) << step; j < ((4 * k + 1) << step); j += 4) {
         __m256d e0_real = _mm256_load_pd(&a[j]);
@@ -891,10 +858,14 @@ void ifft_dif(double *a, int n_pow) {
         _mm256_store_pd(&a[j + imag_offset], _mm256_add_pd(e2_imag, o2_imag));
         _mm256_store_pd(&a[j + (1uz << step)], _mm256_add_pd(e3_real, o3_real));
         _mm256_store_pd(&a[j + (1uz << step) + imag_offset], _mm256_add_pd(e3_imag, o3_imag));
-        _mm256_store_pd(&a[j + (2uz << step)], _mm256_fmadd_pd(w_real, eo2_real, _mm256_mul_pd(w_imag, eo2_imag)));
-        _mm256_store_pd(&a[j + (2uz << step) + imag_offset], _mm256_fmsub_pd(w_real, eo2_imag, _mm256_mul_pd(w_imag, eo2_real)));
-        _mm256_store_pd(&a[j + (3uz << step)], _mm256_fmadd_pd(w_real, eo3_real, _mm256_mul_pd(w_imag, eo3_imag)));
-        _mm256_store_pd(&a[j + (3uz << step) + imag_offset], _mm256_fmsub_pd(w_real, eo3_imag, _mm256_mul_pd(w_imag, eo3_real)));
+        _mm256_store_pd(&a[j + (2uz << step)],
+                        _mm256_fmadd_pd(w_real, eo2_real, _mm256_mul_pd(w_imag, eo2_imag)));
+        _mm256_store_pd(&a[j + (2uz << step) + imag_offset],
+                        _mm256_fmsub_pd(w_real, eo2_imag, _mm256_mul_pd(w_imag, eo2_real)));
+        _mm256_store_pd(&a[j + (3uz << step)],
+                        _mm256_fmadd_pd(w_real, eo3_real, _mm256_mul_pd(w_imag, eo3_imag)));
+        _mm256_store_pd(&a[j + (3uz << step) + imag_offset],
+                        _mm256_fmsub_pd(w_real, eo3_imag, _mm256_mul_pd(w_imag, eo3_real)));
       }
     }
   };
@@ -908,26 +879,27 @@ void ifft_dif(double *a, int n_pow) {
 
       __m256d w01_real_low = _mm256_load_pd(&twiddles_bitreversed[2 * k]);
       __m256d w01_real_high = _mm256_load_pd(&twiddles_bitreversed[2 * k + 4]);
-      __m256d w0_real = _mm256_permute4x64_pd(_mm256_unpacklo_pd(w01_real_low, w01_real_high), 0b11011000);
-      __m256d w1_real = _mm256_permute4x64_pd(_mm256_unpackhi_pd(w01_real_low, w01_real_high), 0b11011000);
+      __m256d w0_real =
+          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w01_real_low, w01_real_high), 0b11011000);
+      __m256d w1_real =
+          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w01_real_low, w01_real_high), 0b11011000);
 
-      __m256d w01_imag_low = _mm256_load_pd(&twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w01_imag_high = _mm256_load_pd(&twiddles_bitreversed[2 * k + 4 + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w0_imag = _mm256_permute4x64_pd(_mm256_unpacklo_pd(w01_imag_low, w01_imag_high), 0b11011000);
-      __m256d w1_imag = _mm256_permute4x64_pd(_mm256_unpackhi_pd(w01_imag_low, w01_imag_high), 0b11011000);
+      __m256d w01_imag_low =
+          _mm256_load_pd(&twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
+      __m256d w01_imag_high =
+          _mm256_load_pd(&twiddles_bitreversed[2 * k + 4 + (1uz << (twiddles_n_pow - 1))]);
+      __m256d w0_imag =
+          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w01_imag_low, w01_imag_high), 0b11011000);
+      __m256d w1_imag =
+          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w01_imag_low, w01_imag_high), 0b11011000);
 
-      auto [e0_real, o0_real, e1_real, o1_real] = transpose(
-        _mm256_load_pd(&a[4 * k]),
-        _mm256_load_pd(&a[4 * (k + 1)]),
-        _mm256_load_pd(&a[4 * (k + 2)]),
-        _mm256_load_pd(&a[4 * (k + 3)])
-      );
+      auto [e0_real, o0_real, e1_real, o1_real] =
+          transpose(_mm256_load_pd(&a[4 * k]), _mm256_load_pd(&a[4 * (k + 1)]),
+                    _mm256_load_pd(&a[4 * (k + 2)]), _mm256_load_pd(&a[4 * (k + 3)]));
       auto [e0_imag, o0_imag, e1_imag, o1_imag] = transpose(
-        _mm256_load_pd(&a[4 * k + imag_offset]),
-        _mm256_load_pd(&a[4 * (k + 1) + imag_offset]),
-        _mm256_load_pd(&a[4 * (k + 2) + imag_offset]),
-        _mm256_load_pd(&a[4 * (k + 3) + imag_offset])
-      );
+          _mm256_load_pd(&a[4 * k + imag_offset]), _mm256_load_pd(&a[4 * (k + 1) + imag_offset]),
+          _mm256_load_pd(&a[4 * (k + 2) + imag_offset]),
+          _mm256_load_pd(&a[4 * (k + 3) + imag_offset]));
 
       __m256d eo0_real = _mm256_sub_pd(e0_real, o0_real);
       __m256d eo0_imag = _mm256_sub_pd(e0_imag, o0_imag);
@@ -948,23 +920,19 @@ void ifft_dif(double *a, int n_pow) {
       __m256d eo3_real = _mm256_sub_pd(e3_real, o3_real);
       __m256d eo3_imag = _mm256_sub_pd(e3_imag, o3_imag);
 
-      auto [b0_real, b1_real, b2_real, b3_real] = transpose(
-        _mm256_add_pd(e2_real, o2_real),
-        _mm256_add_pd(e3_real, o3_real),
-        _mm256_fmadd_pd(w_real, eo2_real, _mm256_mul_pd(w_imag, eo2_imag)),
-        _mm256_fmadd_pd(w_real, eo3_real, _mm256_mul_pd(w_imag, eo3_imag))
-      );
+      auto [b0_real, b1_real, b2_real, b3_real] =
+          transpose(_mm256_add_pd(e2_real, o2_real), _mm256_add_pd(e3_real, o3_real),
+                    _mm256_fmadd_pd(w_real, eo2_real, _mm256_mul_pd(w_imag, eo2_imag)),
+                    _mm256_fmadd_pd(w_real, eo3_real, _mm256_mul_pd(w_imag, eo3_imag)));
       _mm256_store_pd(&a[4 * k], b0_real);
       _mm256_store_pd(&a[4 * (k + 1)], b1_real);
       _mm256_store_pd(&a[4 * (k + 2)], b2_real);
       _mm256_store_pd(&a[4 * (k + 3)], b3_real);
 
-      auto [b0_imag, b1_imag, b2_imag, b3_imag] = transpose(
-        _mm256_add_pd(e2_imag, o2_imag),
-        _mm256_add_pd(e3_imag, o3_imag),
-        _mm256_fmsub_pd(w_real, eo2_imag, _mm256_mul_pd(w_imag, eo2_real)),
-        _mm256_fmsub_pd(w_real, eo3_imag, _mm256_mul_pd(w_imag, eo3_real))
-      );
+      auto [b0_imag, b1_imag, b2_imag, b3_imag] =
+          transpose(_mm256_add_pd(e2_imag, o2_imag), _mm256_add_pd(e3_imag, o3_imag),
+                    _mm256_fmsub_pd(w_real, eo2_imag, _mm256_mul_pd(w_imag, eo2_real)),
+                    _mm256_fmsub_pd(w_real, eo3_imag, _mm256_mul_pd(w_imag, eo3_real)));
       _mm256_store_pd(&a[4 * k + imag_offset], b0_imag);
       _mm256_store_pd(&a[4 * (k + 1) + imag_offset], b1_imag);
       _mm256_store_pd(&a[4 * (k + 2) + imag_offset], b2_imag);
@@ -985,8 +953,10 @@ void ifft_dif(double *a, int n_pow) {
         __m256d eo_imag = _mm256_sub_pd(e_imag, o_imag);
         _mm256_store_pd(&a[j], _mm256_add_pd(e_real, o_real));
         _mm256_store_pd(&a[j + imag_offset], _mm256_add_pd(e_imag, o_imag));
-        _mm256_store_pd(&a[j + (1uz << step)], _mm256_fmadd_pd(w_real, eo_real, _mm256_mul_pd(w_imag, eo_imag)));
-        _mm256_store_pd(&a[j + (1uz << step) + imag_offset], _mm256_fmsub_pd(w_real, eo_imag, _mm256_mul_pd(w_imag, eo_real)));
+        _mm256_store_pd(&a[j + (1uz << step)],
+                        _mm256_fmadd_pd(w_real, eo_real, _mm256_mul_pd(w_imag, eo_imag)));
+        _mm256_store_pd(&a[j + (1uz << step) + imag_offset],
+                        _mm256_fmsub_pd(w_real, eo_imag, _mm256_mul_pd(w_imag, eo_real)));
       }
     }
   };
@@ -1007,20 +977,16 @@ double* mul_fft_transform_input(ConstRef input, int n_pow) {
   size_t n = 1uz << n_pow;
   __m256d magic = _mm256_set1_pd(0x1p52);
 
-  double *input_fft = new (std::align_val_t(32)) double[n * 2];
+  double* input_fft = new (std::align_val_t(32)) double[n * 2];
 
   // Split into 16-bit words
-  const uint16_t *data = reinterpret_cast<const uint16_t *>(input.data.data());
+  const uint16_t* data = reinterpret_cast<const uint16_t*>(input.data.data());
   for (size_t i = 0; i < input.data.size(); i++) {
-    __m256d fp = _mm256_sub_pd(
-      _mm256_xor_pd(
-        _mm256_castsi256_pd(
-          _mm256_cvtepu16_epi64(_mm_shufflelo_epi16(_mm_cvtsi64_si128(input.data[i]), 0b11011000))
-        ),
-        magic
-      ),
-      magic
-    );
+    __m256d fp =
+        _mm256_sub_pd(_mm256_xor_pd(_mm256_castsi256_pd(_mm256_cvtepu16_epi64(_mm_shufflelo_epi16(
+                                        _mm_cvtsi64_si128(input.data[i]), 0b11011000))),
+                                    magic),
+                      magic);
     _mm_store_pd(&input_fft[i * 2], _mm256_castpd256_pd128(fp));
     _mm_store_pd(&input_fft[i * 2 + n], _mm256_extractf128_pd(fp, 1));
   }
@@ -1033,10 +999,10 @@ double* mul_fft_transform_input(ConstRef input, int n_pow) {
   return input_fft;
 }
 
-double* mul_fft_middle_end(double *lhs_fft_dif, double *rhs_fft_dif, int n_pow) {
+double* mul_fft_middle_end(double* lhs_fft_dif, double* rhs_fft_dif, int n_pow) {
   size_t n = 1uz << n_pow;
 
-  double *prod_fft_dif = new (std::align_val_t(32)) double[n * 2];
+  double* prod_fft_dif = new (std::align_val_t(32)) double[n * 2];
 
   auto handle_iteration_single = [&](size_t k, size_t k_complement) {
     double lhs_k_real = lhs_fft_dif[k];
@@ -1044,7 +1010,8 @@ double* mul_fft_middle_end(double *lhs_fft_dif, double *rhs_fft_dif, int n_pow) 
     double rhs_k_real = rhs_fft_dif[k];
     double rhs_k_imag = rhs_fft_dif[k + n];
     double twiddles_bitreversed_k_real = twiddles_bitreversed[k / 2];
-    double twiddles_bitreversed_k_imag = twiddles_bitreversed[k / 2 + (1uz << (twiddles_n_pow - 1))];
+    double twiddles_bitreversed_k_imag =
+        twiddles_bitreversed[k / 2 + (1uz << (twiddles_n_pow - 1))];
     double sign = k % 2 == 1 ? -1 : 1;
 
     double a_real = lhs_k_real - lhs_fft_dif[k_complement];
@@ -1054,17 +1021,17 @@ double* mul_fft_middle_end(double *lhs_fft_dif, double *rhs_fft_dif, int n_pow) 
     double c_real = a_real * b_real - a_imag * b_imag;
     double c_imag = a_real * b_imag + a_imag * b_real;
 
-    prod_fft_dif[k] = (
-      (lhs_k_real * rhs_k_real - lhs_k_imag * rhs_k_imag)
-      - ((1 + sign * twiddles_bitreversed_k_real) * c_real - sign * twiddles_bitreversed_k_imag * c_imag) / 4
-    );
-    prod_fft_dif[k + n] = (
-      (lhs_k_real * rhs_k_imag + lhs_k_imag * rhs_k_real)
-      - ((1 + sign * twiddles_bitreversed_k_real) * c_imag + sign * twiddles_bitreversed_k_imag * c_real) / 4
-    );
+    prod_fft_dif[k] = ((lhs_k_real * rhs_k_real - lhs_k_imag * rhs_k_imag) -
+                       ((1 + sign * twiddles_bitreversed_k_real) * c_real -
+                        sign * twiddles_bitreversed_k_imag * c_imag) /
+                           4);
+    prod_fft_dif[k + n] = ((lhs_k_real * rhs_k_imag + lhs_k_imag * rhs_k_real) -
+                           ((1 + sign * twiddles_bitreversed_k_real) * c_imag +
+                            sign * twiddles_bitreversed_k_imag * c_real) /
+                               4);
   };
 
-  double *twiddles_bitreversed_ptr = twiddles_bitreversed;
+  double* twiddles_bitreversed_ptr = twiddles_bitreversed;
   size_t twiddles_imag_offset = 1uz << (twiddles_n_pow - 1);
 
   auto handle_iteration_vectorized = [&](size_t k, size_t k_complement) {
@@ -1073,48 +1040,46 @@ double* mul_fft_middle_end(double *lhs_fft_dif, double *rhs_fft_dif, int n_pow) 
     __m256d rhs_k_real = _mm256_load_pd(&rhs_fft_dif[k]);
     __m256d rhs_k_imag = _mm256_load_pd(&rhs_fft_dif[k + n]);
 
-    __m256d twiddles_bitreversed_k_real = _mm256_permute4x64_pd(_mm256_castpd128_pd256(_mm_load_pd(&twiddles_bitreversed_ptr[k / 2])), 0x50);
-    __m256d twiddles_bitreversed_k_imag = _mm256_permute4x64_pd(_mm256_castpd128_pd256(_mm_load_pd(&twiddles_bitreversed_ptr[k / 2 + twiddles_imag_offset])), 0x50);
+    __m256d twiddles_bitreversed_k_real = _mm256_permute4x64_pd(
+        _mm256_castpd128_pd256(_mm_load_pd(&twiddles_bitreversed_ptr[k / 2])), 0x50);
+    __m256d twiddles_bitreversed_k_imag =
+        _mm256_permute4x64_pd(_mm256_castpd128_pd256(_mm_load_pd(
+                                  &twiddles_bitreversed_ptr[k / 2 + twiddles_imag_offset])),
+                              0x50);
 
-    __m256d a_real = _mm256_sub_pd(lhs_k_real, _mm256_permute4x64_pd(_mm256_load_pd(&lhs_fft_dif[k_complement]), 0b00011011));
-    __m256d a_imag = _mm256_add_pd(lhs_k_imag, _mm256_permute4x64_pd(_mm256_load_pd(&lhs_fft_dif[k_complement + n]), 0b00011011));
-    __m256d b_real = _mm256_sub_pd(rhs_k_real, _mm256_permute4x64_pd(_mm256_load_pd(&rhs_fft_dif[k_complement]), 0b00011011));
-    __m256d b_imag = _mm256_add_pd(rhs_k_imag, _mm256_permute4x64_pd(_mm256_load_pd(&rhs_fft_dif[k_complement + n]), 0b00011011));
+    __m256d a_real = _mm256_sub_pd(
+        lhs_k_real, _mm256_permute4x64_pd(_mm256_load_pd(&lhs_fft_dif[k_complement]), 0b00011011));
+    __m256d a_imag = _mm256_add_pd(
+        lhs_k_imag,
+        _mm256_permute4x64_pd(_mm256_load_pd(&lhs_fft_dif[k_complement + n]), 0b00011011));
+    __m256d b_real = _mm256_sub_pd(
+        rhs_k_real, _mm256_permute4x64_pd(_mm256_load_pd(&rhs_fft_dif[k_complement]), 0b00011011));
+    __m256d b_imag = _mm256_add_pd(
+        rhs_k_imag,
+        _mm256_permute4x64_pd(_mm256_load_pd(&rhs_fft_dif[k_complement + n]), 0b00011011));
     __m256d c_real = _mm256_fmsub_pd(a_real, b_real, _mm256_mul_pd(a_imag, b_imag));
     __m256d c_imag = _mm256_fmadd_pd(a_real, b_imag, _mm256_mul_pd(a_imag, b_real));
 
-    _mm256_store_pd(&prod_fft_dif[k], _mm256_fmsub_pd(
-      lhs_k_real,
-      rhs_k_real,
-      _mm256_fmsubadd_pd(
-        lhs_k_imag,
-        rhs_k_imag,
-        _mm256_mul_pd(
-          _mm256_set1_pd(0.25),
-          _mm256_fmsub_pd(
-            twiddles_bitreversed_k_real,
-            c_real,
-            _mm256_fmaddsub_pd(twiddles_bitreversed_k_imag, c_imag, c_real)
-          )
-        )
-      )
-    ));
-    _mm256_store_pd(&prod_fft_dif[k + n], _mm256_fmadd_pd(
-      lhs_k_real,
-      rhs_k_imag,
-      _mm256_fmaddsub_pd(
-        lhs_k_imag,
-        rhs_k_real,
-        _mm256_mul_pd(
-          _mm256_set1_pd(0.25),
-          _mm256_fmadd_pd(
-            twiddles_bitreversed_k_real,
-            c_imag,
-            _mm256_fmsubadd_pd(twiddles_bitreversed_k_imag, c_real, c_imag)
-          )
-        )
-      )
-    ));
+    _mm256_store_pd(
+        &prod_fft_dif[k],
+        _mm256_fmsub_pd(
+            lhs_k_real, rhs_k_real,
+            _mm256_fmsubadd_pd(
+                lhs_k_imag, rhs_k_imag,
+                _mm256_mul_pd(_mm256_set1_pd(0.25),
+                              _mm256_fmsub_pd(twiddles_bitreversed_k_real, c_real,
+                                              _mm256_fmaddsub_pd(twiddles_bitreversed_k_imag,
+                                                                 c_imag, c_real))))));
+    _mm256_store_pd(
+        &prod_fft_dif[k + n],
+        _mm256_fmadd_pd(
+            lhs_k_real, rhs_k_imag,
+            _mm256_fmaddsub_pd(
+                lhs_k_imag, rhs_k_real,
+                _mm256_mul_pd(_mm256_set1_pd(0.25),
+                              _mm256_fmadd_pd(twiddles_bitreversed_k_real, c_imag,
+                                              _mm256_fmsubadd_pd(twiddles_bitreversed_k_imag,
+                                                                 c_real, c_imag))))));
   };
 
   handle_iteration_single(0, 0);
@@ -1131,7 +1096,7 @@ double* mul_fft_middle_end(double *lhs_fft_dif, double *rhs_fft_dif, int n_pow) 
   return prod_fft_dif;
 }
 
-BigInt mul_fft_transform_output(double *prod_fft_dif, int n_pow) {
+BigInt mul_fft_transform_output(double* prod_fft_dif, int n_pow) {
   size_t n = 1uz << n_pow;
   __m256d magic = _mm256_set1_pd(0x1p52 * n);
 
@@ -1146,15 +1111,13 @@ BigInt mul_fft_transform_output(double *prod_fft_dif, int n_pow) {
     __m128d fp02 = _mm_load_pd(&prod_fft_dif[2 * k]);
     __m128d fp13 = _mm_load_pd(&prod_fft_dif[2 * k + n]);
     __m256d fp = _mm256_set_m128d(_mm_unpackhi_pd(fp02, fp13), _mm_unpacklo_pd(fp02, fp13));
-    __m256i word = _mm256_castpd_si256(_mm256_xor_pd(_mm256_add_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.), fp), magic), magic));
+    __m256i word = _mm256_castpd_si256(
+        _mm256_xor_pd(_mm256_add_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.), fp), magic), magic));
 
-    __uint128_t tmp = (
-      carry
-      + static_cast<uint64_t>(word[0])
-      + (__uint128_t{static_cast<uint64_t>(word[1])} << 16)
-      + (__uint128_t{static_cast<uint64_t>(word[2])} << 32)
-      + (__uint128_t{static_cast<uint64_t>(word[3])} << 48)
-    );
+    __uint128_t tmp = (carry + static_cast<uint64_t>(word[0]) +
+                       (__uint128_t{static_cast<uint64_t>(word[1])} << 16) +
+                       (__uint128_t{static_cast<uint64_t>(word[2])} << 32) +
+                       (__uint128_t{static_cast<uint64_t>(word[3])} << 48));
 
     result.data[k] = static_cast<uint64_t>(tmp);
     carry = static_cast<uint64_t>(tmp >> 64);
@@ -1165,7 +1128,7 @@ BigInt mul_fft_transform_output(double *prod_fft_dif, int n_pow) {
   return result;
 }
 
-std::ostream &operator<<(std::ostream &out, ConstRef rhs);
+std::ostream& operator<<(std::ostream& out, ConstRef rhs);
 
 BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
   // We use a trick to compute n-sized FFT of real-valued input using a single n/2-sized FFT as
@@ -1313,9 +1276,9 @@ BigInt mul_fft(ConstRef lhs, ConstRef rhs) {
 
   int n_pow = get_fft_n_pow(lhs, rhs);
   ensure_twiddle_factors(n_pow);
-  double *lhs_fft_dif = mul_fft_transform_input(lhs, n_pow);
-  double *rhs_fft_dif = mul_fft_transform_input(rhs, n_pow);
-  double *prod_fft_dif = mul_fft_middle_end(lhs_fft_dif, rhs_fft_dif, n_pow);
+  double* lhs_fft_dif = mul_fft_transform_input(lhs, n_pow);
+  double* rhs_fft_dif = mul_fft_transform_input(rhs, n_pow);
+  double* prod_fft_dif = mul_fft_middle_end(lhs_fft_dif, rhs_fft_dif, n_pow);
   ::operator delete[](lhs_fft_dif, std::align_val_t(32));
   ::operator delete[](rhs_fft_dif, std::align_val_t(32));
   BigInt result = mul_fft_transform_output(prod_fft_dif, n_pow);
@@ -1344,19 +1307,18 @@ BigInt::BigInt(int value) {
   }
 }
 
-BigInt::BigInt(const char *s, with_base base)
-    : BigInt(std::string_view(s), base) {}
+BigInt::BigInt(const char* s, with_base base) : BigInt(std::string_view(s), base) {}
 
 BigInt::BigInt(ConstRef rhs) : data(rhs.data) {}
-BigInt::BigInt(const BigInt &rhs) : data(rhs.data) {}
-BigInt::BigInt(BigInt &&rhs) : data(std::move(rhs.data)) {}
+BigInt::BigInt(const BigInt& rhs) : data(rhs.data) {}
+BigInt::BigInt(BigInt&& rhs) : data(std::move(rhs.data)) {}
 
-BigInt &BigInt::operator=(ConstRef rhs) {
+BigInt& BigInt::operator=(ConstRef rhs) {
   data = rhs.data;
   return *this;
 }
 
-BigInt &BigInt::operator=(BigInt &&rhs) {
+BigInt& BigInt::operator=(BigInt&& rhs) {
   data = std::move(rhs.data);
   return *this;
 }
@@ -1368,14 +1330,14 @@ bool operator<(ConstRef lhs, ConstRef rhs) {
   if (lhs.data.size() != rhs.data.size()) {
     return lhs.data.size() < rhs.data.size();
   }
-  return std::lexicographical_compare(lhs.data.rbegin(), lhs.data.rend(),
-                                      rhs.data.rbegin(), rhs.data.rend());
+  return std::lexicographical_compare(lhs.data.rbegin(), lhs.data.rend(), rhs.data.rbegin(),
+                                      rhs.data.rend());
 }
 bool operator>(ConstRef lhs, ConstRef rhs) { return rhs < lhs; }
 bool operator<=(ConstRef lhs, ConstRef rhs) { return !(rhs < lhs); }
 bool operator>=(ConstRef lhs, ConstRef rhs) { return !(lhs < rhs); }
 
-BigInt &BigInt::operator+=(ConstRef rhs) {
+BigInt& BigInt::operator+=(ConstRef rhs) {
   data.increase_size_zerofill(std::max(data.size(), rhs.data.size()) + 1);
   add_to(*this, rhs);
   if (data.back() == 0) {
@@ -1384,7 +1346,7 @@ BigInt &BigInt::operator+=(ConstRef rhs) {
   return *this;
 }
 
-BigInt &BigInt::operator-=(ConstRef rhs) {
+BigInt& BigInt::operator-=(ConstRef rhs) {
   if (rhs.data.empty()) {
     return *this;
   }
@@ -1427,8 +1389,7 @@ BigInt &BigInt::operator-=(ConstRef rhs) {
       "jc 4b;"
       "3:"
       : [offset] "+r"(offset), [value1] "=&r"(value1), [value2] "=&r"(value2),
-        [unrolled_loop_count] "+r"(unrolled_loop_count),
-        [left_loop_count] "+r"(left_loop_count)
+        [unrolled_loop_count] "+r"(unrolled_loop_count), [left_loop_count] "+r"(left_loop_count)
       : [data_ptr] "r"(data.data()), [rhs_data_ptr] "r"(rhs.data.data())
       : "flags", "memory");
 
@@ -1436,21 +1397,17 @@ BigInt &BigInt::operator-=(ConstRef rhs) {
   return *this;
 }
 
-BigInt &BigInt::operator+=(const BigInt &rhs) {
-  return *this += static_cast<ConstRef>(rhs);
-}
-BigInt &BigInt::operator-=(const BigInt &rhs) {
-  return *this -= static_cast<ConstRef>(rhs);
-}
+BigInt& BigInt::operator+=(const BigInt& rhs) { return *this += static_cast<ConstRef>(rhs); }
+BigInt& BigInt::operator-=(const BigInt& rhs) { return *this -= static_cast<ConstRef>(rhs); }
 
-BigInt &BigInt::operator++() { return *this += 1; }
+BigInt& BigInt::operator++() { return *this += 1; }
 BigInt BigInt::operator++(int) {
   BigInt tmp = *this;
   ++*this;
   return tmp;
 }
 
-BigInt &BigInt::operator--() { return *this -= 1; }
+BigInt& BigInt::operator--() { return *this -= 1; }
 BigInt BigInt::operator--(int) {
   BigInt tmp = *this;
   --*this;
@@ -1460,7 +1417,7 @@ BigInt BigInt::operator--(int) {
 BigInt operator+(BigInt lhs, ConstRef rhs) { return lhs += rhs; }
 BigInt operator-(BigInt lhs, ConstRef rhs) { return lhs -= rhs; }
 
-BigInt &operator*=(BigInt &lhs, uint64_t rhs) {
+BigInt& operator*=(BigInt& lhs, uint64_t rhs) {
   if (rhs == 0) {
     lhs.data.clear_dealloc();
     return lhs;
@@ -1478,7 +1435,7 @@ BigInt &operator*=(BigInt &lhs, uint64_t rhs) {
 }
 
 uint32_t BigInt::divmod_inplace(uint32_t rhs) {
-  uint32_t *lhs_data = reinterpret_cast<uint32_t *>(data.data());
+  uint32_t* lhs_data = reinterpret_cast<uint32_t*>(data.data());
   size_t lhs_size = data.size() * 2;
 
   uint32_t remainder = 0;
@@ -1517,7 +1474,7 @@ void BigInt::divide_inplace_whole(uint64_t rhs) {
   _normalize();
 }
 
-BigInt &operator/=(BigInt &lhs, uint32_t rhs) {
+BigInt& operator/=(BigInt& lhs, uint32_t rhs) {
   lhs.divmod_inplace(rhs);
   return lhs;
 }
@@ -1565,33 +1522,30 @@ void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
   result.data[lhs.data.size()] = carry;
 }
 
-__attribute__((noinline)) void mul_quadratic(Ref result, ConstRef lhs,
-                                             ConstRef rhs) {
+__attribute__((noinline)) void mul_quadratic(Ref result, ConstRef lhs, ConstRef rhs) {
   size_t size = lhs.data.size() + rhs.data.size() - 1;
 
   uint64_t carry_low = 0;
   uint64_t carry_high = 0;
   for (size_t i = 0; i < size; i++) {
-    size_t left = static_cast<size_t>(
-        std::max(static_cast<ssize_t>(i + 1 - rhs.data.size()), 0z));
+    size_t left = static_cast<size_t>(std::max(static_cast<ssize_t>(i + 1 - rhs.data.size()), 0z));
     size_t right = std::min(i + 1, lhs.data.size());
 
     uint64_t sum_low = carry_low;
     uint64_t sum_mid = carry_high;
     uint64_t sum_high = 0;
 
-#define LOOP                                                                   \
-  do {                                                                         \
-    uint64_t rax = lhs.data[left];                                             \
-    asm("mulq %[b];"                                                           \
-        "add %%rax, %[sum_low];"                                               \
-        "adc %%rdx, %[sum_mid];"                                               \
-        "adc $0, %[sum_high];"                                                 \
-        : "+a"(rax), [sum_low] "+r"(sum_low), [sum_mid] "+r"(sum_mid),         \
-          [sum_high] "+r"(sum_high)                                            \
-        : [b] "m"(rhs.data[i - left])                                          \
-        : "flags", "rdx");                                                     \
-    left++;                                                                    \
+#define LOOP                                                                                       \
+  do {                                                                                             \
+    uint64_t rax = lhs.data[left];                                                                 \
+    asm("mulq %[b];"                                                                               \
+        "add %%rax, %[sum_low];"                                                                   \
+        "adc %%rdx, %[sum_mid];"                                                                   \
+        "adc $0, %[sum_high];"                                                                     \
+        : "+a"(rax), [sum_low] "+r"(sum_low), [sum_mid] "+r"(sum_mid), [sum_high] "+r"(sum_high)   \
+        : [b] "m"(rhs.data[i - left])                                                              \
+        : "flags", "rdx");                                                                         \
+    left++;                                                                                        \
   } while (0)
 
     while (left + 8 <= right) {
@@ -1685,8 +1639,8 @@ void mul_toom33(Ref result, ConstRef lhs, ConstRef rhs) {
   BigInt b0_plus_b1_plus_b2 = b0_plus_b2 + b1;
   BigInt r1 = a0_plus_a1_plus_a2 * b0_plus_b1_plus_b2;
   BigInt rm1 = (std::move(a0_plus_a2) - a1) * (std::move(b0_plus_b2) - b1);
-  BigInt r2 = (std::move(a0_plus_a1_plus_a2) + a1 + a2 * 3) *
-              (std::move(b0_plus_b1_plus_b2) + b1 + b2 * 3);
+  BigInt r2 =
+      (std::move(a0_plus_a1_plus_a2) + a1 + a2 * 3) * (std::move(b0_plus_b1_plus_b2) + b1 + b2 * 3);
   BigInt rinf_2 = rinf * 2;
 
   auto half = [](BigInt a) {
@@ -1772,8 +1726,8 @@ uint64_t str_to_int_64(Iterator begin, Iterator end, uint64_t base, Map map) {
 }
 
 template <typename Iterator, typename Map>
-__uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base,
-                           int max_block_len, uint64_t base_product, Map map) {
+__uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base, int max_block_len,
+                           uint64_t base_product, Map map) {
   uint64_t low = str_to_int_64(begin, begin + max_block_len, base, map);
   uint64_t high = str_to_int_64(begin + max_block_len, end, base, map);
   return static_cast<__uint128_t>(high) * base_product + low;
@@ -1781,14 +1735,13 @@ __uint128_t str_to_int_128(Iterator begin, Iterator end, uint64_t base,
 
 template <typename Iterator, typename Map>
 void str_to_int_inplace(Iterator begin, Iterator end, uint64_t base, Map map,
-                        const BigInt *powers_of_base, int max_block_len,
-                        uint64_t base_product, BigInt &result) {
+                        const BigInt* powers_of_base, int max_block_len, uint64_t base_product,
+                        BigInt& result) {
   if (end - begin <= max_block_len) {
     result += str_to_int_64(begin, end, base, map);
     return;
   } else if (end - begin <= 2 * max_block_len) {
-    result +=
-        str_to_int_128(begin, end, base, max_block_len, base_product, map);
+    result += str_to_int_128(begin, end, base, max_block_len, base_product, map);
     return;
   } else if (end - begin <= 200 * max_block_len) {
     int first_block_len = static_cast<int>((end - begin) % max_block_len);
@@ -1804,16 +1757,13 @@ void str_to_int_inplace(Iterator begin, Iterator end, uint64_t base, Map map,
     return;
   }
 
-  int low_len_pow =
-      63 - __builtin_clzll(static_cast<uint64_t>(end - begin - 1));
+  int low_len_pow = 63 - __builtin_clzll(static_cast<uint64_t>(end - begin - 1));
   ssize_t low_len = 1z << low_len_pow;
   Iterator mid = begin + low_len;
   BigInt high;
-  str_to_int_inplace(mid, end, base, map, powers_of_base, max_block_len,
-                     base_product, high);
+  str_to_int_inplace(mid, end, base, map, powers_of_base, max_block_len, base_product, high);
   result += high * powers_of_base[low_len_pow];
-  str_to_int_inplace(begin, mid, base, map, powers_of_base, max_block_len,
-                     base_product, result);
+  str_to_int_inplace(begin, mid, base, map, powers_of_base, max_block_len, base_product, result);
 }
 
 template <typename Iterator, typename Map>
@@ -1831,14 +1781,13 @@ BigInt str_to_int(Iterator begin, Iterator end, uint64_t base, Map map) {
   }
 
   BigInt result;
-  str_to_int_inplace(begin, end, base, map, powers_of_base.data(),
-                     max_block_len, base_product, result);
+  str_to_int_inplace(begin, end, base, map, powers_of_base.data(), max_block_len, base_product,
+                     result);
   return result;
 }
 
-template <typename List, typename> BigInt::BigInt(List &&list, with_base base) {
-  *this = str_to_int(list.begin(), list.end(), base.base,
-                     [](uint64_t digit) { return digit; });
+template <typename List, typename> BigInt::BigInt(List&& list, with_base base) {
+  *this = str_to_int(list.begin(), list.end(), base.base, [](uint64_t digit) { return digit; });
 }
 BigInt::BigInt(std::string_view s, with_base base) {
   ensure(base.base <= 36);
@@ -1856,7 +1805,7 @@ BigInt::BigInt(std::string_view s, with_base base) {
   });
 }
 
-std::ostream &operator<<(std::ostream &out, ConstRef rhs) {
+std::ostream& operator<<(std::ostream& out, ConstRef rhs) {
   if (rhs.data.empty()) {
     return out << "0x0";
   }
