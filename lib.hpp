@@ -499,7 +499,7 @@ void add_to(Ref lhs, ConstRef rhs) {
 inline constexpr int FFT_CUTOFF = 10;
 inline constexpr int FFT_RECURSIVE = 10;
 inline constexpr int FFT_MAX_16BIT = 19;  // a bit less than 52 - 16 * 2
-inline constexpr int FFT_MAX_12BIT = 26;  // XXX: this bound is unverified
+inline constexpr int FFT_MAX_12BIT = 26;  // a bit less than 52 - 12 * 2
 
 struct Complex {
   double real, imag;
@@ -1732,7 +1732,7 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
         mul_fft(result, lhs, rhs, n_pow, 16);
       } else {
         n_pow = get_fft_n_pow_12bit(lhs, rhs);
-        ensure(n_pow <= FFT_MAX_12BIT);  // XXX: is this impossible?
+        ensure(n_pow <= FFT_MAX_12BIT);  // XXX: how do we handle larger numbers?
         mul_fft(result, lhs, rhs, n_pow, 12);
       }
     } else if (lhs.data.size() * 2 < rhs.data.size()) {
