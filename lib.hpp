@@ -605,41 +605,44 @@ std::array<__m256d, 4> transpose(__m256d a0, __m256d a1, __m256d a2, __m256d a3)
           _mm256_permute2f128_pd(b0, b2, 0x31), _mm256_permute2f128_pd(b1, b3, 0x31)};
 }
 
-struct ComplexArray {
-  // reals, followed by imags
+struct ComplexSpan {
+  // Interleaved storage: real0..3, imag0..3, real4..7, imag4..7, ...
   double* data;
-  size_t imag_offset;
 
-  Complex read1(size_t i) {
-    return {data[i], data[i + imag_offset]};
+  Complex read1(size_t i) const {
+    i = i / 4 * 8 + i % 4;
+    return {data[i], data[i + 4]};
   }
   void write1(size_t i, Complex value) {
+    i = i / 4 * 8 + i % 4;
     data[i] = value.real;
-    data[i + imag_offset] = value.imag;
+    data[i + 4] = value.imag;
   }
 
   // Data stored as real0, real1, ..., imag0, imag1
-  Complex2 read2(size_t i) {
-    return {_mm_load_pd(&data[i]), _mm_load_pd(&data[i + imag_offset])};
+  Complex2 read2(size_t i) const {
+    i = i / 4 * 8 + i % 4;
+    return {_mm_load_pd(&data[i]), _mm_load_pd(&data[i + 4])};
   }
   void write2(size_t i, Complex2 value) {
+    i = i / 4 * 8 + i % 4;
     _mm_store_pd(&data[i], value.real);
-    _mm_store_pd(&data[i + imag_offset], value.imag);
+    _mm_store_pd(&data[i + 4], value.imag);
   }
 
   // Data stored as real0, real1, real2, real3, ..., imag0, imag1, imag2, imag3
-  Complex4 read4(size_t i) {
-    return {_mm256_load_pd(&data[i]), _mm256_load_pd(&data[i + imag_offset])};
+  Complex4 read4(size_t i) const {
+    return {_mm256_load_pd(&data[i * 2]), _mm256_load_pd(&data[i * 2 + 4])};
   }
   void write4(size_t i, Complex4 value) {
-    _mm256_store_pd(&data[i], value.real);
-    _mm256_store_pd(&data[i + imag_offset], value.imag);
+    _mm256_store_pd(&data[i * 2], value.real);
+    _mm256_store_pd(&data[i * 2 + 4], value.imag);
   }
 
   // Data stored as real0, real4, real8, real12, real1, real5, real9, real13, real2, real6, real10,
   // real14, real3, real7, real11, real15, ..., <same with imag>. This pattern occurs in low levels
   // of FFT
-  std::array<Complex4, 4> read_transposed44(size_t i) {
+  std::array<Complex4, 4> read_transposed44(size_t i) const {
     auto a0 = read4(i);
     auto a1 = read4(i + 4);
     auto a2 = read4(i + 8);
@@ -664,7 +667,7 @@ struct ComplexArray {
 
   // Data stored as real0, real4, real1, real5, real2, real6, real3, real7, ..., <same with imag>.
   // This pattern arises on vectorizing reads at 2k and 2k+1
-  std::array<Complex4, 2> read_transposed24(size_t i) {
+  std::array<Complex4, 2> read_transposed24(size_t i) const {
     Complex4 low = read4(i);
     Complex4 high = read4(i + 4);
     return {
@@ -680,8 +683,33 @@ struct ComplexArray {
   }
 
   void zero_many(size_t i, size_t count) {
-    memzero64(reinterpret_cast<uint64_t*>(data + i), count);
-    memzero64(reinterpret_cast<uint64_t*>(data + i + imag_offset), count);
+    while (i % 4 != 0 && count > 0) {
+      write1(i, Complex{0, 0});
+      i++;
+      count--;
+    }
+    memzero64(reinterpret_cast<uint64_t*>(data + i * 2), count * 2);
+  }
+};
+
+struct ComplexArray: public ComplexSpan {
+  // Overaligning to 64 bytes (as opposed to 32 bytes for SIMD) helps with cache locality because
+  // real and imag halves are always in the same cache line
+  ComplexArray(size_t n): ComplexSpan(new (std::align_val_t(64)) double[2 * n]) {}
+  ~ComplexArray() {
+    ::operator delete[](data, std::align_val_t(64));
+  }
+  ComplexArray(const ComplexArray&) = delete;
+  ComplexArray(ComplexArray&& rhs): ComplexSpan(rhs.data) {
+    rhs.data = nullptr;
+  }
+  ComplexArray& operator=(const ComplexArray&) = delete;
+  ComplexArray& operator=(ComplexArray&& rhs) {
+    if (this != &rhs) {
+      data = rhs.data;
+      rhs.data = nullptr;
+    }
+    return *this;
   }
 };
 
@@ -689,14 +717,19 @@ ComplexArray construct_initial_twiddles_bitreversed() {
   // bitreversed k | length | k | n | 2 pi k / n | cos      | sin
   // 0             | 0      | 0 | 2 | 0          | 1        | 0
   // 1             | 1      | 1 | 4 | pi/2       | 0        | 1
-  return {
-    new (std::align_val_t(32)) double[4]{1, 0, 0, 1},
-    2
-  };
+  // 2             | 2      | 1 | 8 | pi/4       | 1/sqrt2  | 1/sqrt2
+  // 3             | 2      | 3 | 8 | 3pi/4      | -1/sqrt2 | 1/sqrt2
+  double r = sqrt(0.5);
+  ComplexArray arr(4);
+  arr.write1(0, {1, 0});
+  arr.write1(1, {0, 1});
+  arr.write1(2, {r, r});
+  arr.write1(3, {-r, r});
+  return arr;
 }
 
 inline ComplexArray twiddles_bitreversed = construct_initial_twiddles_bitreversed();
-inline int twiddles_n_pow = 2;
+inline int twiddles_n_pow = 3;
 
 uint32_t bitreverse(uint32_t k, int n_pow) {
   k <<= 32 - n_pow;
@@ -719,13 +752,11 @@ void ensure_twiddle_factors(int want_n_pow) {
   // is a prefix of twiddle_bitreversed of a larger n)
   size_t old_n = 1uz << twiddles_n_pow;
   size_t new_n = 1uz << want_n_pow;
-  auto new_twiddles_bitreversed = new (std::align_val_t(32)) double[new_n];
-  memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed),
-           reinterpret_cast<uint64_t*>(twiddles_bitreversed.data), old_n / 2);
-  memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed) + new_n / 2,
-           reinterpret_cast<uint64_t*>(twiddles_bitreversed.data + old_n / 2), old_n / 2);
-  ::operator delete[](twiddles_bitreversed.data, std::align_val_t(32));
-  twiddles_bitreversed = {new_twiddles_bitreversed, new_n / 2};
+  ComplexArray new_twiddles_bitreversed(new_n / 2);
+  memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed.data),
+           reinterpret_cast<uint64_t*>(twiddles_bitreversed.data), old_n);
+  ::operator delete[](twiddles_bitreversed.data, std::align_val_t(64));
+  twiddles_bitreversed = std::move(new_twiddles_bitreversed);
   double coeff = 2 * PI / static_cast<double>(new_n);
   for (size_t k = old_n / 4; k < new_n / 4; k++) {
     double angle = coeff * bitreverse(k, want_n_pow - 2);
@@ -750,7 +781,7 @@ int get_fft_n_pow_12bit(ConstRef lhs, ConstRef rhs) {
   return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 8 / 3 + 1);
 }
 
-void fft_dif(ComplexArray a, int n_pow, size_t k_base) {
+void fft_dif(ComplexSpan a, int n_pow, size_t k_base) {
   // FFT-DIF is defined by
   //     FFT-DIF[P]_k = FFT[P]_{bitreverse(k)}
   // For
@@ -796,20 +827,26 @@ void fft_dif(ComplexArray a, int n_pow, size_t k_base) {
   //       }
   //     }
 
+  // Prevent re-reading of twiddles base address after every store, because Clang assumes
+  // _mm*_store_* may alias anything
+  ComplexSpan twiddles_bitreversed_span(twiddles_bitreversed);
   int step = n_pow - 1;
 
   // It's critical for performance to perform multiple steps at once
   auto radix4_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 1 - step)); k++) {
-      Complex4 w = twiddles_bitreversed.read1(k);
-      Complex4 w2 = twiddles_bitreversed.read1(2 * k);
-      Complex4 w3 = twiddles_bitreversed.read1(2 * k + 1);
+      Complex4 w = twiddles_bitreversed_span.read1(k);
+      Complex4 w2 = twiddles_bitreversed_span.read1(2 * k);
+      Complex4 w3 = twiddles_bitreversed_span.read1(2 * k + 1);
 
+      size_t i1 = 1uz << (step - 1);
+      size_t i2 = 2uz << (step - 1);
+      size_t i3 = 3uz << (step - 1);
       for (size_t j = (4 * k) << (step - 1); j < ((4 * k + 1) << (step - 1)); j += 4) {
         Complex4 a0 = a.read4(j);
-        Complex4 a1 = a.read4(j + (1uz << (step - 1)));
-        Complex4 a2 = a.read4(j + (2uz << (step - 1)));
-        Complex4 a3 = a.read4(j + (3uz << (step - 1)));
+        Complex4 a1 = a.read4(j + i1);
+        Complex4 a2 = a.read4(j + i2);
+        Complex4 a3 = a.read4(j + i3);
         Complex4 wa2 = w * a2;
         Complex4 wa3 = w * a3;
         Complex4 e2 = a0 + wa2;
@@ -817,9 +854,9 @@ void fft_dif(ComplexArray a, int n_pow, size_t k_base) {
         Complex4 wo2 = w2 * (a1 + wa3);
         Complex4 wo3 = w3 * (a1 - wa3);
         a.write4(j, e2 + wo2);
-        a.write4(j + (1uz << (step - 1)), e2 - wo2);
-        a.write4(j + (2uz << (step - 1)), e3 + wo3);
-        a.write4(j + (3uz << (step - 1)), e3 - wo3);
+        a.write4(j + i1, e2 - wo2);
+        a.write4(j + i2, e3 + wo3);
+        a.write4(j + i3, e3 - wo3);
       }
     }
   };
@@ -828,8 +865,8 @@ void fft_dif(ComplexArray a, int n_pow, size_t k_base) {
     ensure(step == 1);
 
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 2)); k += 4) {
-      Complex4 w = twiddles_bitreversed.read4(k);
-      auto [w2, w3] = twiddles_bitreversed.read_transposed24(2 * k);
+      Complex4 w = twiddles_bitreversed_span.read4(k);
+      auto [w2, w3] = twiddles_bitreversed_span.read_transposed24(2 * k);
       auto [a0, a1, a2, a3] = a.read_transposed44(4 * k);
       Complex4 wa2 = w * a2;
       Complex4 wa3 = w * a3;
@@ -843,7 +880,7 @@ void fft_dif(ComplexArray a, int n_pow, size_t k_base) {
 
   auto radix2_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 1 - step)); k++) {
-      Complex4 w = twiddles_bitreversed.read1(k);
+      Complex4 w = twiddles_bitreversed_span.read1(k);
       for (size_t j = (2 * k) << step; j < ((2 * k + 1) << step); j += 4) {
         Complex4 e = a.read4(j);
         Complex4 o = a.read4(j + (1uz << step));
@@ -887,7 +924,7 @@ void fft_dif(ComplexArray a, int n_pow, size_t k_base) {
   }
 }
 
-void ifft_dif(ComplexArray a, int n_pow, size_t k_base) {
+void ifft_dif(ComplexSpan a, int n_pow, size_t k_base) {
   // This algorithm is a straightforward reverse of FFT-DIF, except that the result is multiplicated
   // by n:
   //     def IFFT-DIF(A):
@@ -913,28 +950,34 @@ void ifft_dif(ComplexArray a, int n_pow, size_t k_base) {
   //       }
   //     }
 
+  // Prevent re-reading of twiddles base address after every store, because Clang assumes
+  // _mm*_store_* may alias anything
+  ComplexSpan twiddles_bitreversed_span(twiddles_bitreversed);
   int step = 0;
 
   // It's critical for performance to perform multiple steps at once
   auto radix4_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 2 - step)); k++) {
-      Complex4 w = twiddles_bitreversed.read1(k);
-      Complex4 w0 = twiddles_bitreversed.read1(2 * k);
-      Complex4 w1 = twiddles_bitreversed.read1(2 * k + 1);
+      Complex4 w = twiddles_bitreversed_span.read1(k);
+      Complex4 w0 = twiddles_bitreversed_span.read1(2 * k);
+      Complex4 w1 = twiddles_bitreversed_span.read1(2 * k + 1);
 
+      size_t i1 = 1uz << step;
+      size_t i2 = 2uz << step;
+      size_t i3 = 3uz << step;
       for (size_t j = (4 * k) << step; j < ((4 * k + 1) << step); j += 4) {
         Complex4 e0 = a.read4(j);
-        Complex4 o0 = a.read4(j + (1uz << step));
-        Complex4 e1 = a.read4(j + (2uz << step));
-        Complex4 o1 = a.read4(j + (3uz << step));
+        Complex4 o0 = a.read4(j + i1);
+        Complex4 e1 = a.read4(j + i2);
+        Complex4 o1 = a.read4(j + i3);
         Complex4 e2 = e0 + o0;
         Complex4 e3 = w0.conj_mul(e0 - o0);
         Complex4 o2 = e1 + o1;
         Complex4 o3 = w1.conj_mul(e1 - o1);
         a.write4(j, e2 + o2);
-        a.write4(j + (1uz << step), e3 + o3);
-        a.write4(j + (2uz << step), w.conj_mul(e2 - o2));
-        a.write4(j + (3uz << step), w.conj_mul(e3 - o3));
+        a.write4(j + i1, e3 + o3);
+        a.write4(j + i2, w.conj_mul(e2 - o2));
+        a.write4(j + i3, w.conj_mul(e3 - o3));
       }
     }
   };
@@ -943,8 +986,8 @@ void ifft_dif(ComplexArray a, int n_pow, size_t k_base) {
     ensure(step == 0);
 
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 2)); k += 4) {
-      Complex4 w = twiddles_bitreversed.read4(k);
-      auto [w0, w1] = twiddles_bitreversed.read_transposed24(2 * k);
+      Complex4 w = twiddles_bitreversed_span.read4(k);
+      auto [w0, w1] = twiddles_bitreversed_span.read_transposed24(2 * k);
       auto [e0, o0, e1, o1] = a.read_transposed44(4 * k);
       Complex4 e2 = e0 + o0;
       Complex4 e3 = w0.conj_mul(e0 - o0);
@@ -956,7 +999,7 @@ void ifft_dif(ComplexArray a, int n_pow, size_t k_base) {
 
   auto radix2_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 1 - step)); k++) {
-      Complex4 w = twiddles_bitreversed.read1(k);
+      Complex4 w = twiddles_bitreversed_span.read1(k);
       for (size_t j = (2 * k) << step; j < ((2 * k + 1) << step); j += 4) {
         Complex4 e = a.read4(j);
         Complex4 o = a.read4(j + (1uz << step));
@@ -1002,11 +1045,7 @@ __m256d u64_to_double(__m256i integers) {
 ComplexArray mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness) {
   size_t n = 1uz << n_pow;
 
-  // Add one double between real and imag halves to help cache aliasing
-  ComplexArray input_fft = {
-    new (std::align_val_t(32)) double[n * 2 + 4],
-    n + 4
-  };
+  ComplexArray input_fft(n);
 
   // Split into words
   size_t k = 0;
@@ -1087,11 +1126,7 @@ ComplexArray mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness
 ComplexArray mul_fft_middle_end(ComplexArray lhs_fft_dif, ComplexArray rhs_fft_dif, int n_pow) {
   size_t n = 1uz << n_pow;
 
-  // Add one double between real and imag halves to help cache aliasing
-  ComplexArray prod_fft_dif = {
-    new (std::align_val_t(32)) double[n * 2 + 4],
-    n + 4
-  };
+  ComplexArray prod_fft_dif(n);
 
   auto handle_iteration_single = [&](size_t k, size_t k_complement) {
     Complex lhs_k = lhs_fft_dif.read1(k);
@@ -1134,7 +1169,7 @@ ComplexArray mul_fft_middle_end(ComplexArray lhs_fft_dif, ComplexArray rhs_fft_d
   return prod_fft_dif;
 }
 
-void mul_fft_transform_output(Ref result, ComplexArray prod_fft_dif, int n_pow, int word_bitness) {
+void mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, int word_bitness) {
   size_t n = 1uz << n_pow;
   __m256d magic = _mm256_set1_pd(0x1p52 * n);
 
@@ -1353,11 +1388,8 @@ void mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness
   ensure_twiddle_factors(n_pow);
   ComplexArray lhs_fft_dif = mul_fft_transform_input(lhs, n_pow, word_bitness);
   ComplexArray rhs_fft_dif = mul_fft_transform_input(rhs, n_pow, word_bitness);
-  ComplexArray prod_fft_dif = mul_fft_middle_end(lhs_fft_dif, rhs_fft_dif, n_pow);
-  ::operator delete[](lhs_fft_dif.data, std::align_val_t(32));
-  ::operator delete[](rhs_fft_dif.data, std::align_val_t(32));
+  ComplexArray prod_fft_dif = mul_fft_middle_end(std::move(lhs_fft_dif), std::move(rhs_fft_dif), n_pow);
   mul_fft_transform_output(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow, word_bitness);
-  ::operator delete[](prod_fft_dif.data, std::align_val_t(32));
 }
 
 BigInt::BigInt(SmallVec data) : data(data) {}
