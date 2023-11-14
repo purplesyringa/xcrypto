@@ -608,6 +608,7 @@ std::array<__m256d, 4> transpose(__m256d a0, __m256d a1, __m256d a2, __m256d a3)
 struct ComplexSpan {
   // Interleaved storage: real0..3, imag0..3, real4..7, imag4..7, ...
   double* data;
+  ComplexSpan(double* data) : data(data) {}
 
   Complex read1(size_t i) const {
     i = i / 4 * 8 + i % 4;
@@ -695,15 +696,13 @@ struct ComplexSpan {
 struct ComplexArray: public ComplexSpan {
   // Overaligning to 64 bytes (as opposed to 32 bytes for SIMD) helps with cache locality because
   // real and imag halves are always in the same cache line
-  ComplexArray(size_t n): ComplexSpan(new (std::align_val_t(64)) double[2 * n]) {}
+  ComplexArray(size_t n) : ComplexSpan(new (std::align_val_t(64)) double[2 * n]) {}
   ~ComplexArray() {
     ::operator delete[](data, std::align_val_t(64));
   }
-  ComplexArray(const ComplexArray&) = delete;
   ComplexArray(ComplexArray&& rhs): ComplexSpan(rhs.data) {
     rhs.data = nullptr;
   }
-  ComplexArray& operator=(const ComplexArray&) = delete;
   ComplexArray& operator=(ComplexArray&& rhs) {
     if (this != &rhs) {
       data = rhs.data;
