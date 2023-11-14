@@ -501,14 +501,201 @@ inline constexpr int FFT_RECURSIVE = 10;
 inline constexpr int FFT_MAX_16BIT = 19;  // a bit less than 52 - 16 * 2
 inline constexpr int FFT_MAX_12BIT = 26;  // XXX: this bound is unverified
 
-double* construct_initial_twiddles_bitreversed() {
+struct Complex {
+  double real, imag;
+  Complex minus_conj(Complex b) const {
+    return {real - b.real, imag + b.imag};
+  }
+};
+Complex operator-(Complex a) {
+  return {-a.real, -a.imag};
+}
+Complex operator-(Complex a, Complex b) {
+  return {a.real - b.real, a.imag - b.imag};
+}
+Complex operator*(Complex a, Complex b) {
+  return {a.real * b.real - a.imag * b.imag, a.real * b.imag + a.imag * b.real};
+}
+Complex operator*(Complex a, double b) {
+  return {a.real * b, a.imag * b};
+}
+Complex operator+(Complex a, double b) {
+  return {a.real + b, a.imag};
+}
+
+struct Complex4 {
+  __m256d real, imag;
+  Complex4(__m256d real, __m256d imag): real(real), imag(imag) {}
+  Complex4(Complex value): real(_mm256_set1_pd(value.real)), imag(_mm256_set1_pd(value.imag)) {}
+  Complex4 conj_mul(Complex4 b) const {
+    return {
+      _mm256_fmadd_pd(real, b.real, _mm256_mul_pd(imag, b.imag)),
+      _mm256_fmsub_pd(real, b.imag, _mm256_mul_pd(imag, b.real))
+    };
+  }
+  Complex4 minus_conj(Complex4 b) const {
+    return {_mm256_sub_pd(real, b.real), _mm256_add_pd(imag, b.imag)};
+  }
+  // real0, real1, real2, real3 -> real3, real2, real1, real0, same with imag
+  Complex4 reverse() const {
+    return {_mm256_permute4x64_pd(real, 0x1b), _mm256_permute4x64_pd(imag, 0x1b)};
+  }
+  // a0, a1, a2, a3 -> a0, -a1, a2, -a3
+  Complex4 alternate_signs() const {
+    __m256d magic = _mm256_set_pd(-0., 0., -0., 0.);
+    return {_mm256_xor_pd(real, magic), _mm256_xor_pd(imag, magic)};
+  }
+  // a * b + c
+  Complex4 fmadd(Complex4 b, Complex4 c) const {
+    return {
+      _mm256_fmsub_pd(real, b.real, _mm256_fmsub_pd(imag, b.imag, c.real)),
+      _mm256_fmadd_pd(real, b.imag, _mm256_fmadd_pd(imag, b.real, c.imag))
+    };
+  }
+  // a * b - c
+  Complex4 fmsub(Complex4 b, Complex4 c) const {
+    return {
+      _mm256_fmsub_pd(real, b.real, _mm256_fmadd_pd(imag, b.imag, c.real)),
+      _mm256_fmadd_pd(real, b.imag, _mm256_fmsub_pd(imag, b.real, c.imag))
+    };
+  }
+};
+Complex4 operator+(Complex4 a, Complex4 b) {
+  return {_mm256_add_pd(a.real, b.real), _mm256_add_pd(a.imag, b.imag)};
+}
+Complex4 operator-(Complex4 a, Complex4 b) {
+  return {_mm256_sub_pd(a.real, b.real), _mm256_sub_pd(a.imag, b.imag)};
+}
+Complex4 operator*(Complex4 a, Complex4 b) {
+  return {
+    _mm256_fmsub_pd(a.real, b.real, _mm256_mul_pd(a.imag, b.imag)),
+    _mm256_fmadd_pd(a.real, b.imag, _mm256_mul_pd(a.imag, b.real))
+  };
+}
+Complex4 operator*(Complex4 a, double b) {
+  __m256d bvec = _mm256_set1_pd(b);
+  return {_mm256_mul_pd(a.real, bvec), _mm256_mul_pd(a.imag, bvec)};
+}
+
+struct Complex2 {
+  __m128d real, imag;
+  // real0, real1, imag0, imag1
+  static Complex2 from_continuous(__m256d value) {
+    return {_mm256_castpd256_pd128(value), _mm256_extractf128_pd(value, 1)};
+  }
+  // real0, imag0, real1, imag1
+  __m256d to_interleaved() const {
+    return _mm256_set_m128d(_mm_unpackhi_pd(real, imag), _mm_unpacklo_pd(real, imag));
+  }
+  // real0, real1 -> real0, real0, real1, real1, same with imag
+  Complex4 duplicate_continuous() const {
+    return {
+      _mm256_permute4x64_pd(_mm256_castpd128_pd256(real), 0x50),
+      _mm256_permute4x64_pd(_mm256_castpd128_pd256(imag), 0x50)
+    };
+  }
+};
+
+std::array<__m256d, 4> transpose(__m256d a0, __m256d a1, __m256d a2, __m256d a3) {
+  __m256d b0 = _mm256_unpacklo_pd(a0, a1);
+  __m256d b1 = _mm256_unpackhi_pd(a0, a1);
+  __m256d b2 = _mm256_unpacklo_pd(a2, a3);
+  __m256d b3 = _mm256_unpackhi_pd(a2, a3);
+  return {_mm256_permute2f128_pd(b0, b2, 0x20), _mm256_permute2f128_pd(b1, b3, 0x20),
+          _mm256_permute2f128_pd(b0, b2, 0x31), _mm256_permute2f128_pd(b1, b3, 0x31)};
+}
+
+struct ComplexArray {
+  // reals, followed by imags
+  double* data;
+  size_t imag_offset;
+
+  Complex read1(size_t i) {
+    return {data[i], data[i + imag_offset]};
+  }
+  void write1(size_t i, Complex value) {
+    data[i] = value.real;
+    data[i + imag_offset] = value.imag;
+  }
+
+  // Data stored as real0, real1, ..., imag0, imag1
+  Complex2 read2(size_t i) {
+    return {_mm_load_pd(&data[i]), _mm_load_pd(&data[i + imag_offset])};
+  }
+  void write2(size_t i, Complex2 value) {
+    _mm_store_pd(&data[i], value.real);
+    _mm_store_pd(&data[i + imag_offset], value.imag);
+  }
+
+  // Data stored as real0, real1, real2, real3, ..., imag0, imag1, imag2, imag3
+  Complex4 read4(size_t i) {
+    return {_mm256_load_pd(&data[i]), _mm256_load_pd(&data[i + imag_offset])};
+  }
+  void write4(size_t i, Complex4 value) {
+    _mm256_store_pd(&data[i], value.real);
+    _mm256_store_pd(&data[i + imag_offset], value.imag);
+  }
+
+  // Data stored as real0, real4, real8, real12, real1, real5, real9, real13, real2, real6, real10,
+  // real14, real3, real7, real11, real15, ..., <same with imag>. This pattern occurs in low levels
+  // of FFT
+  std::array<Complex4, 4> read_transposed44(size_t i) {
+    auto a0 = read4(i);
+    auto a1 = read4(i + 4);
+    auto a2 = read4(i + 8);
+    auto a3 = read4(i + 12);
+    auto [b0_real, b1_real, b2_real, b3_real] = transpose(a0.real, a1.real, a2.real, a3.real);
+    auto [b0_imag, b1_imag, b2_imag, b3_imag] = transpose(a0.imag, a1.imag, a2.imag, a3.imag);
+    return {{
+      {b0_real, b0_imag},
+      {b1_real, b1_imag},
+      {b2_real, b2_imag},
+      {b3_real, b3_imag}
+    }};
+  }
+  void write_transposed44(size_t i, Complex4 a0, Complex4 a1, Complex4 a2, Complex4 a3) {
+    auto [b0_real, b1_real, b2_real, b3_real] = transpose(a0.real, a1.real, a2.real, a3.real);
+    auto [b0_imag, b1_imag, b2_imag, b3_imag] = transpose(a0.imag, a1.imag, a2.imag, a3.imag);
+    write4(i, {b0_real, b0_imag});
+    write4(i + 4, {b1_real, b1_imag});
+    write4(i + 8, {b2_real, b2_imag});
+    write4(i + 12, {b3_real, b3_imag});
+  }
+
+  // Data stored as real0, real4, real1, real5, real2, real6, real3, real7, ..., <same with imag>.
+  // This pattern arises on vectorizing reads at 2k and 2k+1
+  std::array<Complex4, 2> read_transposed24(size_t i) {
+    Complex4 low = read4(i);
+    Complex4 high = read4(i + 4);
+    return {
+      Complex4{
+        _mm256_permute4x64_pd(_mm256_unpacklo_pd(low.real, high.real), 0xd8),
+        _mm256_permute4x64_pd(_mm256_unpacklo_pd(low.imag, high.imag), 0xd8)
+      },
+      Complex4{
+        _mm256_permute4x64_pd(_mm256_unpackhi_pd(low.real, high.real), 0xd8),
+        _mm256_permute4x64_pd(_mm256_unpackhi_pd(low.imag, high.imag), 0xd8)
+      }
+    };
+  }
+
+  void zero_many(size_t i, size_t count) {
+    memzero64(reinterpret_cast<uint64_t*>(data + i), count);
+    memzero64(reinterpret_cast<uint64_t*>(data + i + imag_offset), count);
+  }
+};
+
+ComplexArray construct_initial_twiddles_bitreversed() {
   // bitreversed k | length | k | n | 2 pi k / n | cos      | sin
   // 0             | 0      | 0 | 2 | 0          | 1        | 0
   // 1             | 1      | 1 | 4 | pi/2       | 0        | 1
-  return new (std::align_val_t(32)) double[4]{1, 0, 0, 1};
+  return {
+    new (std::align_val_t(32)) double[4]{1, 0, 0, 1},
+    2
+  };
 }
 
-inline double* twiddles_bitreversed = construct_initial_twiddles_bitreversed();
+inline ComplexArray twiddles_bitreversed = construct_initial_twiddles_bitreversed();
 inline int twiddles_n_pow = 2;
 
 uint32_t bitreverse(uint32_t k, int n_pow) {
@@ -534,20 +721,18 @@ void ensure_twiddle_factors(int want_n_pow) {
   size_t new_n = 1uz << want_n_pow;
   auto new_twiddles_bitreversed = new (std::align_val_t(32)) double[new_n];
   memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed),
-           reinterpret_cast<uint64_t*>(twiddles_bitreversed), old_n / 2);
+           reinterpret_cast<uint64_t*>(twiddles_bitreversed.data), old_n / 2);
   memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed) + new_n / 2,
-           reinterpret_cast<uint64_t*>(twiddles_bitreversed + old_n / 2), old_n / 2);
-  ::operator delete[](twiddles_bitreversed, std::align_val_t(32));
-  twiddles_bitreversed = new_twiddles_bitreversed;
+           reinterpret_cast<uint64_t*>(twiddles_bitreversed.data + old_n / 2), old_n / 2);
+  ::operator delete[](twiddles_bitreversed.data, std::align_val_t(32));
+  twiddles_bitreversed = {new_twiddles_bitreversed, new_n / 2};
   double coeff = 2 * PI / static_cast<double>(new_n);
   for (size_t k = old_n / 4; k < new_n / 4; k++) {
     double angle = coeff * bitreverse(k, want_n_pow - 2);
     double c = std::cos(angle);
     double s = std::sin(angle);
-    twiddles_bitreversed[2 * k] = c;
-    twiddles_bitreversed[2 * k + 1] = -s;
-    twiddles_bitreversed[2 * k + new_n / 2] = s;
-    twiddles_bitreversed[2 * k + 1 + new_n / 2] = c;
+    twiddles_bitreversed.write1(2 * k, {c, s});
+    twiddles_bitreversed.write1(2 * k + 1, {-s, c});
   }
 
   twiddles_n_pow = want_n_pow;
@@ -565,16 +750,7 @@ int get_fft_n_pow_12bit(ConstRef lhs, ConstRef rhs) {
   return 64 - __builtin_clzll((lhs.data.size() + rhs.data.size()) * 8 / 3 + 1);
 }
 
-std::array<__m256d, 4> transpose(__m256d a0, __m256d a1, __m256d a2, __m256d a3) {
-  __m256d b0 = _mm256_unpacklo_pd(a0, a1);
-  __m256d b1 = _mm256_unpackhi_pd(a0, a1);
-  __m256d b2 = _mm256_unpacklo_pd(a2, a3);
-  __m256d b3 = _mm256_unpackhi_pd(a2, a3);
-  return {_mm256_permute2f128_pd(b0, b2, 0x20), _mm256_permute2f128_pd(b1, b3, 0x20),
-          _mm256_permute2f128_pd(b0, b2, 0x31), _mm256_permute2f128_pd(b1, b3, 0x31)};
-}
-
-void fft_dif(double* real, double* imag, int n_pow, size_t k_base) {
+void fft_dif(ComplexArray a, int n_pow, size_t k_base) {
   // FFT-DIF is defined by
   //     FFT-DIF[P]_k = FFT[P]_{bitreverse(k)}
   // For
@@ -609,19 +785,13 @@ void fft_dif(double* real, double* imag, int n_pow, size_t k_base) {
   // Non-vectorized code:
   //     for (int step = n_pow - 1; step >= 0; step--) {
   //       for (size_t k = 0; k < (1uz << (n_pow - 1 - step)); k++) {
-  //         double w_real = twiddles_bitreversed[k];
-  //         double w_imag = twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))];
+  //         Complex w = twiddles_bitreversed.read1(k);
   //         for (size_t j = (2 * k) << step; j < ((2 * k + 1) << step); j++) {
-  //           double e_real = real[j];
-  //           double e_imag = imag[j];
-  //           double o_real = real[j + (1uz << step)];
-  //           double o_imag = imag[j + (1uz << step)];
-  //           double wo_real = w_real * o_real - w_imag * o_imag;
-  //           double wo_imag = w_real * o_imag + w_imag * o_real;
-  //           real[j] = e_real + wo_real;
-  //           imag[j] = e_imag + wo_imag;
-  //           real[j + (1uz << step)] = e_real - wo_real;
-  //           imag[j + (1uz << step)] = e_imag - wo_imag;
+  //           Complex e = a.read1(j);
+  //           Complex o = a.read1(j + (1uz << step));
+  //           Complex wo_real = w * o;
+  //           a.write1(j, e + wo);
+  //           a.write1(j + (1uz << step), e - wo);
   //         }
   //       }
   //     }
@@ -631,54 +801,25 @@ void fft_dif(double* real, double* imag, int n_pow, size_t k_base) {
   // It's critical for performance to perform multiple steps at once
   auto radix4_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 1 - step)); k++) {
-      __m256d w_real = _mm256_set1_pd(twiddles_bitreversed[k]);
-      __m256d w_imag = _mm256_set1_pd(twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w2_real = _mm256_set1_pd(twiddles_bitreversed[2 * k]);
-      __m256d w2_imag = _mm256_set1_pd(twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w3_real = _mm256_set1_pd(twiddles_bitreversed[2 * k + 1]);
-      __m256d w3_imag =
-          _mm256_set1_pd(twiddles_bitreversed[2 * k + 1 + (1uz << (twiddles_n_pow - 1))]);
+      Complex4 w = twiddles_bitreversed.read1(k);
+      Complex4 w2 = twiddles_bitreversed.read1(2 * k);
+      Complex4 w3 = twiddles_bitreversed.read1(2 * k + 1);
 
       for (size_t j = (4 * k) << (step - 1); j < ((4 * k + 1) << (step - 1)); j += 4) {
-        __m256d a0_real = _mm256_load_pd(&real[j]);
-        __m256d a0_imag = _mm256_load_pd(&imag[j]);
-        __m256d a1_real = _mm256_load_pd(&real[j + (1uz << (step - 1))]);
-        __m256d a1_imag = _mm256_load_pd(&imag[j + (1uz << (step - 1))]);
-        __m256d a2_real = _mm256_load_pd(&real[j + (2uz << (step - 1))]);
-        __m256d a2_imag = _mm256_load_pd(&imag[j + (2uz << (step - 1))]);
-        __m256d a3_real = _mm256_load_pd(&real[j + (3uz << (step - 1))]);
-        __m256d a3_imag = _mm256_load_pd(&imag[j + (3uz << (step - 1))]);
-
-        __m256d wa2_real = _mm256_fmsub_pd(w_real, a2_real, _mm256_mul_pd(w_imag, a2_imag));
-        __m256d wa2_imag = _mm256_fmadd_pd(w_real, a2_imag, _mm256_mul_pd(w_imag, a2_real));
-        __m256d wa3_real = _mm256_fmsub_pd(w_real, a3_real, _mm256_mul_pd(w_imag, a3_imag));
-        __m256d wa3_imag = _mm256_fmadd_pd(w_real, a3_imag, _mm256_mul_pd(w_imag, a3_real));
-
-        __m256d e2_real = _mm256_add_pd(a0_real, wa2_real);
-        __m256d e2_imag = _mm256_add_pd(a0_imag, wa2_imag);
-        __m256d o2_real = _mm256_add_pd(a1_real, wa3_real);
-        __m256d o2_imag = _mm256_add_pd(a1_imag, wa3_imag);
-        __m256d e3_real = _mm256_sub_pd(a0_real, wa2_real);
-        __m256d e3_imag = _mm256_sub_pd(a0_imag, wa2_imag);
-        __m256d o3_real = _mm256_sub_pd(a1_real, wa3_real);
-        __m256d o3_imag = _mm256_sub_pd(a1_imag, wa3_imag);
-
-        __m256d wo2_real = _mm256_fmsub_pd(w2_real, o2_real, _mm256_mul_pd(w2_imag, o2_imag));
-        __m256d wo2_imag = _mm256_fmadd_pd(w2_real, o2_imag, _mm256_mul_pd(w2_imag, o2_real));
-        __m256d wo3_real = _mm256_fmsub_pd(w3_real, o3_real, _mm256_mul_pd(w3_imag, o3_imag));
-        __m256d wo3_imag = _mm256_fmadd_pd(w3_real, o3_imag, _mm256_mul_pd(w3_imag, o3_real));
-
-        _mm256_store_pd(&real[j], _mm256_add_pd(e2_real, wo2_real));
-        _mm256_store_pd(&imag[j], _mm256_add_pd(e2_imag, wo2_imag));
-        _mm256_store_pd(&real[j + (1uz << (step - 1))], _mm256_sub_pd(e2_real, wo2_real));
-        _mm256_store_pd(&imag[j + (1uz << (step - 1))],
-                        _mm256_sub_pd(e2_imag, wo2_imag));
-        _mm256_store_pd(&real[j + (2uz << (step - 1))], _mm256_add_pd(e3_real, wo3_real));
-        _mm256_store_pd(&imag[j + (2uz << (step - 1))],
-                        _mm256_add_pd(e3_imag, wo3_imag));
-        _mm256_store_pd(&real[j + (3uz << (step - 1))], _mm256_sub_pd(e3_real, wo3_real));
-        _mm256_store_pd(&imag[j + (3uz << (step - 1))],
-                        _mm256_sub_pd(e3_imag, wo3_imag));
+        Complex4 a0 = a.read4(j);
+        Complex4 a1 = a.read4(j + (1uz << (step - 1)));
+        Complex4 a2 = a.read4(j + (2uz << (step - 1)));
+        Complex4 a3 = a.read4(j + (3uz << (step - 1)));
+        Complex4 wa2 = w * a2;
+        Complex4 wa3 = w * a3;
+        Complex4 e2 = a0 + wa2;
+        Complex4 e3 = a0 - wa2;
+        Complex4 wo2 = w2 * (a1 + wa3);
+        Complex4 wo3 = w3 * (a1 - wa3);
+        a.write4(j, e2 + wo2);
+        a.write4(j + (1uz << (step - 1)), e2 - wo2);
+        a.write4(j + (2uz << (step - 1)), e3 + wo3);
+        a.write4(j + (3uz << (step - 1)), e3 - wo3);
       }
     }
   };
@@ -687,85 +828,28 @@ void fft_dif(double* real, double* imag, int n_pow, size_t k_base) {
     ensure(step == 1);
 
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 2)); k += 4) {
-      __m256d w_real = _mm256_load_pd(&twiddles_bitreversed[k]);
-      __m256d w_imag = _mm256_load_pd(&twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))]);
-
-      __m256d w23_real_low = _mm256_load_pd(&twiddles_bitreversed[2 * k]);
-      __m256d w23_real_high = _mm256_load_pd(&twiddles_bitreversed[2 * k + 4]);
-      __m256d w2_real =
-          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w23_real_low, w23_real_high), 0b11011000);
-      __m256d w3_real =
-          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w23_real_low, w23_real_high), 0b11011000);
-
-      __m256d w23_imag_low =
-          _mm256_load_pd(&twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w23_imag_high =
-          _mm256_load_pd(&twiddles_bitreversed[2 * k + 4 + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w2_imag =
-          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w23_imag_low, w23_imag_high), 0b11011000);
-      __m256d w3_imag =
-          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w23_imag_low, w23_imag_high), 0b11011000);
-
-      auto [a0_real, a1_real, a2_real, a3_real] =
-          transpose(_mm256_load_pd(&real[4 * k]), _mm256_load_pd(&real[4 * (k + 1)]),
-                    _mm256_load_pd(&real[4 * (k + 2)]), _mm256_load_pd(&real[4 * (k + 3)]));
-      auto [a0_imag, a1_imag, a2_imag, a3_imag] = transpose(
-          _mm256_load_pd(&imag[4 * k]), _mm256_load_pd(&imag[4 * (k + 1)]),
-          _mm256_load_pd(&imag[4 * (k + 2)]),
-          _mm256_load_pd(&imag[4 * (k + 3)]));
-
-      __m256d wa2_real = _mm256_fmsub_pd(w_real, a2_real, _mm256_mul_pd(w_imag, a2_imag));
-      __m256d wa2_imag = _mm256_fmadd_pd(w_real, a2_imag, _mm256_mul_pd(w_imag, a2_real));
-      __m256d wa3_real = _mm256_fmsub_pd(w_real, a3_real, _mm256_mul_pd(w_imag, a3_imag));
-      __m256d wa3_imag = _mm256_fmadd_pd(w_real, a3_imag, _mm256_mul_pd(w_imag, a3_real));
-
-      __m256d e2_real = _mm256_add_pd(a0_real, wa2_real);
-      __m256d e2_imag = _mm256_add_pd(a0_imag, wa2_imag);
-      __m256d o2_real = _mm256_add_pd(a1_real, wa3_real);
-      __m256d o2_imag = _mm256_add_pd(a1_imag, wa3_imag);
-      __m256d e3_real = _mm256_sub_pd(a0_real, wa2_real);
-      __m256d e3_imag = _mm256_sub_pd(a0_imag, wa2_imag);
-      __m256d o3_real = _mm256_sub_pd(a1_real, wa3_real);
-      __m256d o3_imag = _mm256_sub_pd(a1_imag, wa3_imag);
-
-      __m256d wo2_real = _mm256_fmsub_pd(w2_real, o2_real, _mm256_mul_pd(w2_imag, o2_imag));
-      __m256d wo2_imag = _mm256_fmadd_pd(w2_real, o2_imag, _mm256_mul_pd(w2_imag, o2_real));
-      __m256d wo3_real = _mm256_fmsub_pd(w3_real, o3_real, _mm256_mul_pd(w3_imag, o3_imag));
-      __m256d wo3_imag = _mm256_fmadd_pd(w3_real, o3_imag, _mm256_mul_pd(w3_imag, o3_real));
-
-      auto [b0_real, b1_real, b2_real, b3_real] =
-          transpose(_mm256_add_pd(e2_real, wo2_real), _mm256_sub_pd(e2_real, wo2_real),
-                    _mm256_add_pd(e3_real, wo3_real), _mm256_sub_pd(e3_real, wo3_real));
-      _mm256_store_pd(&real[4 * k], b0_real);
-      _mm256_store_pd(&real[4 * (k + 1)], b1_real);
-      _mm256_store_pd(&real[4 * (k + 2)], b2_real);
-      _mm256_store_pd(&real[4 * (k + 3)], b3_real);
-
-      auto [b0_imag, b1_imag, b2_imag, b3_imag] =
-          transpose(_mm256_add_pd(e2_imag, wo2_imag), _mm256_sub_pd(e2_imag, wo2_imag),
-                    _mm256_add_pd(e3_imag, wo3_imag), _mm256_sub_pd(e3_imag, wo3_imag));
-      _mm256_store_pd(&imag[4 * k], b0_imag);
-      _mm256_store_pd(&imag[4 * (k + 1)], b1_imag);
-      _mm256_store_pd(&imag[4 * (k + 2)], b2_imag);
-      _mm256_store_pd(&imag[4 * (k + 3)], b3_imag);
+      Complex4 w = twiddles_bitreversed.read4(k);
+      auto [w2, w3] = twiddles_bitreversed.read_transposed24(2 * k);
+      auto [a0, a1, a2, a3] = a.read_transposed44(4 * k);
+      Complex4 wa2 = w * a2;
+      Complex4 wa3 = w * a3;
+      Complex4 e2 = a0 + wa2;
+      Complex4 e3 = a0 - wa2;
+      Complex4 wo2 = w2 * (a1 + wa3);
+      Complex4 wo3 = w3 * (a1 - wa3);
+      a.write_transposed44(4 * k, e2 + wo2, e2 - wo2, e3 + wo3, e3 - wo3);
     }
   };
 
   auto radix2_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 1 - step)); k++) {
-      __m256d w_real = _mm256_set1_pd(twiddles_bitreversed[k]);
-      __m256d w_imag = _mm256_set1_pd(twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))]);
+      Complex4 w = twiddles_bitreversed.read1(k);
       for (size_t j = (2 * k) << step; j < ((2 * k + 1) << step); j += 4) {
-        __m256d e_real = _mm256_load_pd(&real[j]);
-        __m256d e_imag = _mm256_load_pd(&imag[j]);
-        __m256d o_real = _mm256_load_pd(&real[j + (1uz << step)]);
-        __m256d o_imag = _mm256_load_pd(&imag[j + (1uz << step)]);
-        __m256d wo_real = _mm256_fmsub_pd(w_real, o_real, _mm256_mul_pd(w_imag, o_imag));
-        __m256d wo_imag = _mm256_fmadd_pd(w_real, o_imag, _mm256_mul_pd(w_imag, o_real));
-        _mm256_store_pd(&real[j], _mm256_add_pd(e_real, wo_real));
-        _mm256_store_pd(&imag[j], _mm256_add_pd(e_imag, wo_imag));
-        _mm256_store_pd(&real[j + (1uz << step)], _mm256_sub_pd(e_real, wo_real));
-        _mm256_store_pd(&imag[j + (1uz << step)], _mm256_sub_pd(e_imag, wo_imag));
+        Complex4 e = a.read4(j);
+        Complex4 o = a.read4(j + (1uz << step));
+        Complex4 wo = w * o;
+        a.write4(j, e + wo);
+        a.write4(j + (1uz << step), e - wo);
       }
     }
   };
@@ -794,16 +878,16 @@ void fft_dif(double* real, double* imag, int n_pow, size_t k_base) {
   }
 
   if (n_pow >= FFT_RECURSIVE) {
-    fft_dif(real, imag, n_pow - 2, k_base);
-    fft_dif(real, imag, n_pow - 2, k_base + 1);
-    fft_dif(real, imag, n_pow - 2, k_base + 2);
-    fft_dif(real, imag, n_pow - 2, k_base + 3);
+    fft_dif(a, n_pow - 2, k_base);
+    fft_dif(a, n_pow - 2, k_base + 1);
+    fft_dif(a, n_pow - 2, k_base + 2);
+    fft_dif(a, n_pow - 2, k_base + 3);
   } else {
     radix4_low();
   }
 }
 
-void ifft_dif(double* real, double* imag, int n_pow, size_t k_base) {
+void ifft_dif(ComplexArray a, int n_pow, size_t k_base) {
   // This algorithm is a straightforward reverse of FFT-DIF, except that the result is multiplicated
   // by n:
   //     def IFFT-DIF(A):
@@ -820,16 +904,11 @@ void ifft_dif(double* real, double* imag, int n_pow, size_t k_base) {
   //         double w_real = twiddles_bitreversed[k];
   //         double w_imag = twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))];
   //         for (size_t j = (2 * k) << step; j < ((2 * k + 1) << step); j++) {
-  //           double e_real = real[j];
-  //           double e_imag = imag[j];
-  //           double o_real = real[j + (1uz << step)];
-  //           double o_imag = imag[j + (1uz << step)];
-  //           double eo_real = e_real - o_real;
-  //           double eo_imag = e_imag - o_imag;
-  //           real[j] = e_real + o_real;
-  //           imag[j] = e_imag + o_imag;
-  //           real[j + (1uz << step)] = w_real * eo_real + w_imag * eo_imag;
-  //           imag[j + (1uz << step)] = w_real * eo_imag - w_imag * eo_real;
+  //           Complex e = a.read1(j);
+  //           Complex o = a.read1(j + (1uz << step));
+  //           Complex eo = e - o;
+  //           a.write1(j, e + o);
+  //           a.write1(j + (1uz << step), w.conj_mul(eo));
   //         }
   //       }
   //     }
@@ -839,55 +918,23 @@ void ifft_dif(double* real, double* imag, int n_pow, size_t k_base) {
   // It's critical for performance to perform multiple steps at once
   auto radix4_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 2 - step)); k++) {
-      __m256d w_real = _mm256_set1_pd(twiddles_bitreversed[k]);
-      __m256d w_imag = _mm256_set1_pd(twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w0_real = _mm256_set1_pd(twiddles_bitreversed[2 * k]);
-      __m256d w0_imag = _mm256_set1_pd(twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w1_real = _mm256_set1_pd(twiddles_bitreversed[2 * k + 1]);
-      __m256d w1_imag =
-          _mm256_set1_pd(twiddles_bitreversed[2 * k + 1 + (1uz << (twiddles_n_pow - 1))]);
+      Complex4 w = twiddles_bitreversed.read1(k);
+      Complex4 w0 = twiddles_bitreversed.read1(2 * k);
+      Complex4 w1 = twiddles_bitreversed.read1(2 * k + 1);
 
       for (size_t j = (4 * k) << step; j < ((4 * k + 1) << step); j += 4) {
-        __m256d e0_real = _mm256_load_pd(&real[j]);
-        __m256d e0_imag = _mm256_load_pd(&imag[j]);
-        __m256d o0_real = _mm256_load_pd(&real[j + (1uz << step)]);
-        __m256d o0_imag = _mm256_load_pd(&imag[j + (1uz << step)]);
-        __m256d e1_real = _mm256_load_pd(&real[j + (2uz << step)]);
-        __m256d e1_imag = _mm256_load_pd(&imag[j + (2uz << step)]);
-        __m256d o1_real = _mm256_load_pd(&real[j + (3uz << step)]);
-        __m256d o1_imag = _mm256_load_pd(&imag[j + (3uz << step)]);
-
-        __m256d eo0_real = _mm256_sub_pd(e0_real, o0_real);
-        __m256d eo0_imag = _mm256_sub_pd(e0_imag, o0_imag);
-        __m256d eo1_real = _mm256_sub_pd(e1_real, o1_real);
-        __m256d eo1_imag = _mm256_sub_pd(e1_imag, o1_imag);
-
-        __m256d e2_real = _mm256_add_pd(e0_real, o0_real);
-        __m256d e2_imag = _mm256_add_pd(e0_imag, o0_imag);
-        __m256d e3_real = _mm256_fmadd_pd(w0_real, eo0_real, _mm256_mul_pd(w0_imag, eo0_imag));
-        __m256d e3_imag = _mm256_fmsub_pd(w0_real, eo0_imag, _mm256_mul_pd(w0_imag, eo0_real));
-        __m256d o2_real = _mm256_add_pd(e1_real, o1_real);
-        __m256d o2_imag = _mm256_add_pd(e1_imag, o1_imag);
-        __m256d o3_real = _mm256_fmadd_pd(w1_real, eo1_real, _mm256_mul_pd(w1_imag, eo1_imag));
-        __m256d o3_imag = _mm256_fmsub_pd(w1_real, eo1_imag, _mm256_mul_pd(w1_imag, eo1_real));
-
-        __m256d eo2_real = _mm256_sub_pd(e2_real, o2_real);
-        __m256d eo2_imag = _mm256_sub_pd(e2_imag, o2_imag);
-        __m256d eo3_real = _mm256_sub_pd(e3_real, o3_real);
-        __m256d eo3_imag = _mm256_sub_pd(e3_imag, o3_imag);
-
-        _mm256_store_pd(&real[j], _mm256_add_pd(e2_real, o2_real));
-        _mm256_store_pd(&imag[j], _mm256_add_pd(e2_imag, o2_imag));
-        _mm256_store_pd(&real[j + (1uz << step)], _mm256_add_pd(e3_real, o3_real));
-        _mm256_store_pd(&imag[j + (1uz << step)], _mm256_add_pd(e3_imag, o3_imag));
-        _mm256_store_pd(&real[j + (2uz << step)],
-                        _mm256_fmadd_pd(w_real, eo2_real, _mm256_mul_pd(w_imag, eo2_imag)));
-        _mm256_store_pd(&imag[j + (2uz << step)],
-                        _mm256_fmsub_pd(w_real, eo2_imag, _mm256_mul_pd(w_imag, eo2_real)));
-        _mm256_store_pd(&real[j + (3uz << step)],
-                        _mm256_fmadd_pd(w_real, eo3_real, _mm256_mul_pd(w_imag, eo3_imag)));
-        _mm256_store_pd(&imag[j + (3uz << step)],
-                        _mm256_fmsub_pd(w_real, eo3_imag, _mm256_mul_pd(w_imag, eo3_real)));
+        Complex4 e0 = a.read4(j);
+        Complex4 o0 = a.read4(j + (1uz << step));
+        Complex4 e1 = a.read4(j + (2uz << step));
+        Complex4 o1 = a.read4(j + (3uz << step));
+        Complex4 e2 = e0 + o0;
+        Complex4 e3 = w0.conj_mul(e0 - o0);
+        Complex4 o2 = e1 + o1;
+        Complex4 o3 = w1.conj_mul(e1 - o1);
+        a.write4(j, e2 + o2);
+        a.write4(j + (1uz << step), e3 + o3);
+        a.write4(j + (2uz << step), w.conj_mul(e2 - o2));
+        a.write4(j + (3uz << step), w.conj_mul(e3 - o3));
       }
     }
   };
@@ -896,89 +943,25 @@ void ifft_dif(double* real, double* imag, int n_pow, size_t k_base) {
     ensure(step == 0);
 
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 2)); k += 4) {
-      __m256d w_real = _mm256_load_pd(&twiddles_bitreversed[k]);
-      __m256d w_imag = _mm256_load_pd(&twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))]);
-
-      __m256d w01_real_low = _mm256_load_pd(&twiddles_bitreversed[2 * k]);
-      __m256d w01_real_high = _mm256_load_pd(&twiddles_bitreversed[2 * k + 4]);
-      __m256d w0_real =
-          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w01_real_low, w01_real_high), 0b11011000);
-      __m256d w1_real =
-          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w01_real_low, w01_real_high), 0b11011000);
-
-      __m256d w01_imag_low =
-          _mm256_load_pd(&twiddles_bitreversed[2 * k + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w01_imag_high =
-          _mm256_load_pd(&twiddles_bitreversed[2 * k + 4 + (1uz << (twiddles_n_pow - 1))]);
-      __m256d w0_imag =
-          _mm256_permute4x64_pd(_mm256_unpacklo_pd(w01_imag_low, w01_imag_high), 0b11011000);
-      __m256d w1_imag =
-          _mm256_permute4x64_pd(_mm256_unpackhi_pd(w01_imag_low, w01_imag_high), 0b11011000);
-
-      auto [e0_real, o0_real, e1_real, o1_real] =
-          transpose(_mm256_load_pd(&real[4 * k]), _mm256_load_pd(&real[4 * (k + 1)]),
-                    _mm256_load_pd(&real[4 * (k + 2)]), _mm256_load_pd(&real[4 * (k + 3)]));
-      auto [e0_imag, o0_imag, e1_imag, o1_imag] = transpose(
-          _mm256_load_pd(&imag[4 * k]), _mm256_load_pd(&imag[4 * (k + 1)]),
-          _mm256_load_pd(&imag[4 * (k + 2)]),
-          _mm256_load_pd(&imag[4 * (k + 3)]));
-
-      __m256d eo0_real = _mm256_sub_pd(e0_real, o0_real);
-      __m256d eo0_imag = _mm256_sub_pd(e0_imag, o0_imag);
-      __m256d eo1_real = _mm256_sub_pd(e1_real, o1_real);
-      __m256d eo1_imag = _mm256_sub_pd(e1_imag, o1_imag);
-
-      __m256d e2_real = _mm256_add_pd(e0_real, o0_real);
-      __m256d e2_imag = _mm256_add_pd(e0_imag, o0_imag);
-      __m256d e3_real = _mm256_fmadd_pd(w0_real, eo0_real, _mm256_mul_pd(w0_imag, eo0_imag));
-      __m256d e3_imag = _mm256_fmsub_pd(w0_real, eo0_imag, _mm256_mul_pd(w0_imag, eo0_real));
-      __m256d o2_real = _mm256_add_pd(e1_real, o1_real);
-      __m256d o2_imag = _mm256_add_pd(e1_imag, o1_imag);
-      __m256d o3_real = _mm256_fmadd_pd(w1_real, eo1_real, _mm256_mul_pd(w1_imag, eo1_imag));
-      __m256d o3_imag = _mm256_fmsub_pd(w1_real, eo1_imag, _mm256_mul_pd(w1_imag, eo1_real));
-
-      __m256d eo2_real = _mm256_sub_pd(e2_real, o2_real);
-      __m256d eo2_imag = _mm256_sub_pd(e2_imag, o2_imag);
-      __m256d eo3_real = _mm256_sub_pd(e3_real, o3_real);
-      __m256d eo3_imag = _mm256_sub_pd(e3_imag, o3_imag);
-
-      auto [b0_real, b1_real, b2_real, b3_real] =
-          transpose(_mm256_add_pd(e2_real, o2_real), _mm256_add_pd(e3_real, o3_real),
-                    _mm256_fmadd_pd(w_real, eo2_real, _mm256_mul_pd(w_imag, eo2_imag)),
-                    _mm256_fmadd_pd(w_real, eo3_real, _mm256_mul_pd(w_imag, eo3_imag)));
-      _mm256_store_pd(&real[4 * k], b0_real);
-      _mm256_store_pd(&real[4 * (k + 1)], b1_real);
-      _mm256_store_pd(&real[4 * (k + 2)], b2_real);
-      _mm256_store_pd(&real[4 * (k + 3)], b3_real);
-
-      auto [b0_imag, b1_imag, b2_imag, b3_imag] =
-          transpose(_mm256_add_pd(e2_imag, o2_imag), _mm256_add_pd(e3_imag, o3_imag),
-                    _mm256_fmsub_pd(w_real, eo2_imag, _mm256_mul_pd(w_imag, eo2_real)),
-                    _mm256_fmsub_pd(w_real, eo3_imag, _mm256_mul_pd(w_imag, eo3_real)));
-      _mm256_store_pd(&imag[4 * k], b0_imag);
-      _mm256_store_pd(&imag[4 * (k + 1)], b1_imag);
-      _mm256_store_pd(&imag[4 * (k + 2)], b2_imag);
-      _mm256_store_pd(&imag[4 * (k + 3)], b3_imag);
+      Complex4 w = twiddles_bitreversed.read4(k);
+      auto [w0, w1] = twiddles_bitreversed.read_transposed24(2 * k);
+      auto [e0, o0, e1, o1] = a.read_transposed44(4 * k);
+      Complex4 e2 = e0 + o0;
+      Complex4 e3 = w0.conj_mul(e0 - o0);
+      Complex4 o2 = e1 + o1;
+      Complex4 o3 = w1.conj_mul(e1 - o1);
+      a.write_transposed44(4 * k, e2 + o2, e3 + o3, w.conj_mul(e2 - o2), w.conj_mul(e3 - o3));
     }
   };
 
   auto radix2_high = [&]() {
     for (size_t k = k_base; k < k_base + (1uz << (n_pow - 1 - step)); k++) {
-      __m256d w_real = _mm256_set1_pd(twiddles_bitreversed[k]);
-      __m256d w_imag = _mm256_set1_pd(twiddles_bitreversed[k + (1uz << (twiddles_n_pow - 1))]);
+      Complex4 w = twiddles_bitreversed.read1(k);
       for (size_t j = (2 * k) << step; j < ((2 * k + 1) << step); j += 4) {
-        __m256d e_real = _mm256_load_pd(&real[j]);
-        __m256d e_imag = _mm256_load_pd(&imag[j]);
-        __m256d o_real = _mm256_load_pd(&real[j + (1uz << step)]);
-        __m256d o_imag = _mm256_load_pd(&imag[j + (1uz << step)]);
-        __m256d eo_real = _mm256_sub_pd(e_real, o_real);
-        __m256d eo_imag = _mm256_sub_pd(e_imag, o_imag);
-        _mm256_store_pd(&real[j], _mm256_add_pd(e_real, o_real));
-        _mm256_store_pd(&imag[j], _mm256_add_pd(e_imag, o_imag));
-        _mm256_store_pd(&real[j + (1uz << step)],
-                        _mm256_fmadd_pd(w_real, eo_real, _mm256_mul_pd(w_imag, eo_imag)));
-        _mm256_store_pd(&imag[j + (1uz << step)],
-                        _mm256_fmsub_pd(w_real, eo_imag, _mm256_mul_pd(w_imag, eo_real)));
+        Complex4 e = a.read4(j);
+        Complex4 o = a.read4(j + (1uz << step));
+        a.write4(j, e + o);
+        a.write4(j + (1uz << step), w.conj_mul(e - o));
       }
     }
   };
@@ -988,10 +971,10 @@ void ifft_dif(double* real, double* imag, int n_pow, size_t k_base) {
   // inlined, so the code is a bit more messy than it could be.
 
   if (n_pow >= FFT_RECURSIVE) {
-    ifft_dif(real, imag, n_pow - 2, k_base);
-    ifft_dif(real, imag, n_pow - 2, k_base + (1uz << (n_pow - 2)));
-    ifft_dif(real, imag, n_pow - 2, k_base + (2uz << (n_pow - 2)));
-    ifft_dif(real, imag, n_pow - 2, k_base + (3uz << (n_pow - 2)));
+    ifft_dif(a, n_pow - 2, k_base);
+    ifft_dif(a, n_pow - 2, k_base + (1uz << (n_pow - 2)));
+    ifft_dif(a, n_pow - 2, k_base + (2uz << (n_pow - 2)));
+    ifft_dif(a, n_pow - 2, k_base + (3uz << (n_pow - 2)));
     step = n_pow - 2;
     k_base >>= n_pow - 2;
   } else {
@@ -1016,20 +999,34 @@ __m256d u64_to_double(__m256i integers) {
   return _mm256_sub_pd(_mm256_xor_pd(_mm256_castsi256_pd(integers), magic), magic);
 }
 
-double* mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness) {
+ComplexArray mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness) {
   size_t n = 1uz << n_pow;
 
   // Add one double between real and imag halves to help cache aliasing
-  double* input_fft = new (std::align_val_t(32)) double[n * 2 + 4];
-  size_t imag_offset = n + 4;
+  ComplexArray input_fft = {
+    new (std::align_val_t(32)) double[n * 2 + 4],
+    n + 4
+  };
 
   // Split into words
   size_t k = 0;
   if (word_bitness == 16) {
     for (; k < input.data.size(); k++) {
-      __m256d fp = u64_to_double(_mm256_blend_epi16(_mm256_setzero_si256(), _mm256_srlv_epi64(_mm256_set1_epi64x(input.data[k]), _mm256_set_epi64x(48, 16, 32, 0)), 0x11));
-      _mm_store_pd(&input_fft[k * 2], _mm256_castpd256_pd128(fp));
-      _mm_store_pd(&input_fft[k * 2 + imag_offset], _mm256_extractf128_pd(fp, 1));
+      input_fft.write2(
+        k * 2,
+        Complex2::from_continuous(
+          u64_to_double(
+            _mm256_blend_epi16(
+              _mm256_setzero_si256(),
+              _mm256_srlv_epi64(
+                _mm256_set1_epi64x(input.data[k]),
+                _mm256_set_epi64x(48, 16, 32, 0)
+              ),
+              0x11
+            )
+          )
+        )
+      );
     }
   } else if (word_bitness == 12) {
     const uint16_t *data = reinterpret_cast<const uint16_t*>(input.data.data());
@@ -1039,9 +1036,20 @@ double* mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness) {
       uint64_t word;
       std::memcpy(&word, &data[k * 3], 8);
       // Split into 12-bit parts
-      __m256d fp = u64_to_double(_mm256_and_si256(_mm256_srlv_epi64(_mm256_set1_epi64x(word), _mm256_set_epi64x(36, 12, 24, 0)), _mm256_set1_epi64x(0xfff)));
-      _mm_store_pd(&input_fft[k * 2], _mm256_castpd256_pd128(fp));
-      _mm_store_pd(&input_fft[k * 2 + imag_offset], _mm256_extractf128_pd(fp, 1));
+      input_fft.write2(
+        k * 2,
+        Complex2::from_continuous(
+          u64_to_double(
+            _mm256_and_si256(
+              _mm256_srlv_epi64(
+                _mm256_set1_epi64x(word),
+                _mm256_set_epi64x(36, 12, 24, 0)
+              ),
+              _mm256_set1_epi64x(0xfff)
+            )
+          )
+        )
+      );
     }
 
     // Last part:
@@ -1050,106 +1058,66 @@ double* mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness) {
     word = (word << 16) | (k * 3 + 1 < input.data.size() * 4 ? data[k * 3 + 1] : 0);
     word = (word << 16) | data[k * 3];
     // Split into 12-bit parts
-    __m256d fp = u64_to_double(_mm256_and_si256(_mm256_srlv_epi64(_mm256_set1_epi64x(word), _mm256_set_epi64x(36, 12, 24, 0)), _mm256_set1_epi64x(0xfff)));
-    _mm_store_pd(&input_fft[k * 2], _mm256_castpd256_pd128(fp));
-    _mm_store_pd(&input_fft[k * 2 + imag_offset], _mm256_extractf128_pd(fp, 1));
+    input_fft.write2(
+      k * 2,
+      Complex2::from_continuous(
+        u64_to_double(
+          _mm256_and_si256(
+            _mm256_srlv_epi64(
+              _mm256_set1_epi64x(word),
+              _mm256_set_epi64x(36, 12, 24, 0)
+            ),
+            _mm256_set1_epi64x(0xfff)
+          )
+        )
+      )
+    );
     k++;
   } else {
     ensure(false);
   }
 
-  size_t count_left = n - k * 2;
-  memzero64(reinterpret_cast<uint64_t*>(input_fft + k * 2), count_left);
-  memzero64(reinterpret_cast<uint64_t*>(input_fft + k * 2 + imag_offset), count_left);
+  input_fft.zero_many(k * 2, n - k * 2);
 
-  fft_dif(input_fft, input_fft + imag_offset, n_pow, 0);
+  fft_dif(input_fft, n_pow, 0);
 
   return input_fft;
 }
 
-double* mul_fft_middle_end(double* lhs_fft_dif, double* rhs_fft_dif, int n_pow) {
+ComplexArray mul_fft_middle_end(ComplexArray lhs_fft_dif, ComplexArray rhs_fft_dif, int n_pow) {
   size_t n = 1uz << n_pow;
 
   // Add one double between real and imag halves to help cache aliasing
-  double* prod_fft_dif = new (std::align_val_t(32)) double[n * 2 + 4];
-  size_t imag_offset = n + 4;
-
-  auto handle_iteration_single = [&](size_t k, size_t k_complement) {
-    double lhs_k_real = lhs_fft_dif[k];
-    double lhs_k_imag = lhs_fft_dif[k + imag_offset];
-    double rhs_k_real = rhs_fft_dif[k];
-    double rhs_k_imag = rhs_fft_dif[k + imag_offset];
-    double twiddles_bitreversed_k_real = twiddles_bitreversed[k / 2];
-    double twiddles_bitreversed_k_imag =
-        twiddles_bitreversed[k / 2 + (1uz << (twiddles_n_pow - 1))];
-    double sign = k % 2 == 1 ? -1 : 1;
-
-    double a_real = lhs_k_real - lhs_fft_dif[k_complement];
-    double a_imag = lhs_k_imag + lhs_fft_dif[k_complement + imag_offset];
-    double b_real = rhs_k_real - rhs_fft_dif[k_complement];
-    double b_imag = rhs_k_imag + rhs_fft_dif[k_complement + imag_offset];
-    double c_real = a_real * b_real - a_imag * b_imag;
-    double c_imag = a_real * b_imag + a_imag * b_real;
-
-    prod_fft_dif[k] = ((lhs_k_real * rhs_k_real - lhs_k_imag * rhs_k_imag) -
-                       ((1 + sign * twiddles_bitreversed_k_real) * c_real -
-                        sign * twiddles_bitreversed_k_imag * c_imag) /
-                           4);
-    prod_fft_dif[k + imag_offset] = ((lhs_k_real * rhs_k_imag + lhs_k_imag * rhs_k_real) -
-                           ((1 + sign * twiddles_bitreversed_k_real) * c_imag +
-                            sign * twiddles_bitreversed_k_imag * c_real) /
-                               4);
+  ComplexArray prod_fft_dif = {
+    new (std::align_val_t(32)) double[n * 2 + 4],
+    n + 4
   };
 
-  double* twiddles_bitreversed_ptr = twiddles_bitreversed;
-  size_t twiddles_imag_offset = 1uz << (twiddles_n_pow - 1);
+  auto handle_iteration_single = [&](size_t k, size_t k_complement) {
+    Complex lhs_k = lhs_fft_dif.read1(k);
+    Complex rhs_k = rhs_fft_dif.read1(k);
+    Complex twiddles_bitreversed_k = twiddles_bitreversed.read1(k / 2);
+    prod_fft_dif.write1(
+      k,
+      lhs_k * rhs_k
+      - (
+        (k % 2 == 1 ? -twiddles_bitreversed_k : twiddles_bitreversed_k) + 1
+      ) * (
+        lhs_k.minus_conj(lhs_fft_dif.read1(k_complement))
+        * rhs_k.minus_conj(rhs_fft_dif.read1(k_complement))
+      ) * 0.25
+    );
+  };
 
   auto handle_iteration_vectorized = [&](size_t k, size_t k_complement) {
-    __m256d lhs_k_real = _mm256_load_pd(&lhs_fft_dif[k]);
-    __m256d lhs_k_imag = _mm256_load_pd(&lhs_fft_dif[k + imag_offset]);
-    __m256d rhs_k_real = _mm256_load_pd(&rhs_fft_dif[k]);
-    __m256d rhs_k_imag = _mm256_load_pd(&rhs_fft_dif[k + imag_offset]);
-
-    __m256d twiddles_bitreversed_k_real = _mm256_permute4x64_pd(
-        _mm256_castpd128_pd256(_mm_load_pd(&twiddles_bitreversed_ptr[k / 2])), 0x50);
-    __m256d twiddles_bitreversed_k_imag =
-        _mm256_permute4x64_pd(_mm256_castpd128_pd256(_mm_load_pd(
-                                  &twiddles_bitreversed_ptr[k / 2 + twiddles_imag_offset])),
-                              0x50);
-
-    __m256d a_real = _mm256_sub_pd(
-        lhs_k_real, _mm256_permute4x64_pd(_mm256_load_pd(&lhs_fft_dif[k_complement]), 0b00011011));
-    __m256d a_imag = _mm256_add_pd(
-        lhs_k_imag,
-        _mm256_permute4x64_pd(_mm256_load_pd(&lhs_fft_dif[k_complement + imag_offset]), 0b00011011));
-    __m256d b_real = _mm256_sub_pd(
-        rhs_k_real, _mm256_permute4x64_pd(_mm256_load_pd(&rhs_fft_dif[k_complement]), 0b00011011));
-    __m256d b_imag = _mm256_add_pd(
-        rhs_k_imag,
-        _mm256_permute4x64_pd(_mm256_load_pd(&rhs_fft_dif[k_complement + imag_offset]), 0b00011011));
-    __m256d c_real = _mm256_fmsub_pd(a_real, b_real, _mm256_mul_pd(a_imag, b_imag));
-    __m256d c_imag = _mm256_fmadd_pd(a_real, b_imag, _mm256_mul_pd(a_imag, b_real));
-
-    _mm256_store_pd(
-        &prod_fft_dif[k],
-        _mm256_fmsub_pd(
-            lhs_k_real, rhs_k_real,
-            _mm256_fmsubadd_pd(
-                lhs_k_imag, rhs_k_imag,
-                _mm256_mul_pd(_mm256_set1_pd(0.25),
-                              _mm256_fmsub_pd(twiddles_bitreversed_k_real, c_real,
-                                              _mm256_fmaddsub_pd(twiddles_bitreversed_k_imag,
-                                                                 c_imag, c_real))))));
-    _mm256_store_pd(
-        &prod_fft_dif[k + imag_offset],
-        _mm256_fmadd_pd(
-            lhs_k_real, rhs_k_imag,
-            _mm256_fmaddsub_pd(
-                lhs_k_imag, rhs_k_real,
-                _mm256_mul_pd(_mm256_set1_pd(0.25),
-                              _mm256_fmadd_pd(twiddles_bitreversed_k_real, c_imag,
-                                              _mm256_fmsubadd_pd(twiddles_bitreversed_k_imag,
-                                                                 c_real, c_imag))))));
+    Complex4 lhs_k = lhs_fft_dif.read4(k);
+    Complex4 rhs_k = rhs_fft_dif.read4(k);
+    Complex4 twiddles_bitreversed_k = twiddles_bitreversed.read2(k / 2).duplicate_continuous().alternate_signs();
+    Complex4 c = (
+      lhs_k.minus_conj(lhs_fft_dif.read4(k_complement).reverse())
+      * rhs_k.minus_conj(rhs_fft_dif.read4(k_complement).reverse())
+    );
+    prod_fft_dif.write4(k, lhs_k.fmsub(rhs_k, twiddles_bitreversed_k.fmadd(c, c) * 0.25));
   };
 
   handle_iteration_single(0, 0);
@@ -1166,21 +1134,24 @@ double* mul_fft_middle_end(double* lhs_fft_dif, double* rhs_fft_dif, int n_pow) 
   return prod_fft_dif;
 }
 
-void mul_fft_transform_output(Ref result, double* prod_fft_dif, int n_pow, int word_bitness) {
+void mul_fft_transform_output(Ref result, ComplexArray prod_fft_dif, int n_pow, int word_bitness) {
   size_t n = 1uz << n_pow;
-  size_t imag_offset = n + 4;
   __m256d magic = _mm256_set1_pd(0x1p52 * n);
 
-  ifft_dif(prod_fft_dif, prod_fft_dif + imag_offset, n_pow, 0);
+  ifft_dif(prod_fft_dif, n_pow, 0);
 
   uint64_t carry = 0;
 
   auto get_word = [&](size_t k) {
-    __m128d fp02 = _mm_load_pd(&prod_fft_dif[2 * k]);
-    __m128d fp13 = _mm_load_pd(&prod_fft_dif[2 * k + imag_offset]);
-    __m256d fp = _mm256_set_m128d(_mm_unpackhi_pd(fp02, fp13), _mm_unpacklo_pd(fp02, fp13));
     return _mm256_castpd_si256(
-        _mm256_xor_pd(_mm256_add_pd(_mm256_andnot_pd(_mm256_set1_pd(-0.), fp), magic), magic));
+      _mm256_xor_pd(
+        _mm256_add_pd(
+          _mm256_andnot_pd(_mm256_set1_pd(-0.), prod_fft_dif.read2(2 * k).to_interleaved()),
+          magic
+        ),
+        magic
+      )
+    );
   };
 
   if (word_bitness == 16) {
@@ -1380,13 +1351,13 @@ void mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness
   // before the predictor aligns to the next segment.
 
   ensure_twiddle_factors(n_pow);
-  double* lhs_fft_dif = mul_fft_transform_input(lhs, n_pow, word_bitness);
-  double* rhs_fft_dif = mul_fft_transform_input(rhs, n_pow, word_bitness);
-  double* prod_fft_dif = mul_fft_middle_end(lhs_fft_dif, rhs_fft_dif, n_pow);
-  ::operator delete[](lhs_fft_dif, std::align_val_t(32));
-  ::operator delete[](rhs_fft_dif, std::align_val_t(32));
+  ComplexArray lhs_fft_dif = mul_fft_transform_input(lhs, n_pow, word_bitness);
+  ComplexArray rhs_fft_dif = mul_fft_transform_input(rhs, n_pow, word_bitness);
+  ComplexArray prod_fft_dif = mul_fft_middle_end(lhs_fft_dif, rhs_fft_dif, n_pow);
+  ::operator delete[](lhs_fft_dif.data, std::align_val_t(32));
+  ::operator delete[](rhs_fft_dif.data, std::align_val_t(32));
   mul_fft_transform_output(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow, word_bitness);
-  ::operator delete[](prod_fft_dif, std::align_val_t(32));
+  ::operator delete[](prod_fft_dif.data, std::align_val_t(32));
 }
 
 BigInt::BigInt(SmallVec data) : data(data) {}
