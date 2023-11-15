@@ -4,21 +4,6 @@
 
 using namespace bigint;
 
-void test(int size, const char* size_text, int n_iterations, const char* s) {
-  BigInt a, b;
-  std::mt19937_64 mt;
-  for (int i = 0; i < size; i++) {
-    a.data.push_back(mt());
-    b.data.push_back(mt());
-  }
-
-  clock_t start = clock();
-  for(int i = 0; i < n_iterations; i++) {
-    a += b;
-  }
-  std::cerr << "add(" << size_text << "): " << static_cast<double>(clock() - start) / CLOCKS_PER_SEC << s << "/iteration" << std::endl;
-}
-
 template<typename F>
 void measure(F f) {
   size_t count = 1;
@@ -51,7 +36,7 @@ void measure(F f) {
 
 template<typename F>
 void with_sizes(F f) {
-  for (size_t base = 10; base <= 10000000; base *= 2) {
+  for (size_t base = 4; base <= 40000000; base *= 2) {
     for (size_t bits = 10 * base; bits < 20 * base; bits += base) {
       f(bits);
     }
