@@ -496,7 +496,6 @@ void add_to(Ref lhs, ConstRef rhs) {
       : "flags", "memory");
 }
 
-inline constexpr int FFT_CUTOFF = 10;
 inline constexpr int FFT_RECURSIVE = 10;
 inline constexpr int FFT_MAX_16BIT = 19;  // a bit less than 52 - 16 * 2
 inline constexpr int FFT_MAX_12BIT = 26;  // a bit less than 52 - 12 * 2
@@ -1625,67 +1624,444 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   result.data[1] = static_cast<uint64_t>(product >> 64);
 }
 
-void mul_nx1(Ref result, ConstRef lhs, uint64_t rhs) {
-  uint64_t carry = 0;
-  for (size_t i = 0; i < lhs.data.size(); i++) {
-    __uint128_t total = __uint128_t{lhs.data[i]} * rhs + carry;
-    result.data[i] = static_cast<uint64_t>(total);
-    carry = static_cast<uint64_t>(total >> 64);
+#define MUL_QUADRATIC_BODY \
+  size_t i = 0; \
+  uint64_t low, high; \
+  \
+  if (rhs.data.size() == 1) { \
+    uint64_t b = rhs.data[0]; \
+    uint64_t tmp = 0; \
+    for (; i + 2 <= lhs.data.size(); i += 2) { \
+      asm volatile( \
+        "mulx %[a0], %[low], %[high];" \
+        "add %[tmp], %[low];" \
+        "adc $0, %[high];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result0];", \
+          "add %[low], %[result0];" \
+          "adc $0, %[high];" \
+        ) \
+        "mulx %[a1], %[low], %[tmp];" \
+        "add %[high], %[low];" \
+        "adc $0, %[tmp];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result1];", \
+          "add %[low], %[result1];" \
+          "adc $0, %[tmp];" \
+        ) \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp] "+r"(tmp), [result0] "+m"(result.data[i]), [result1] "=&m"(result.data[i + 1]) \
+        : [a0] "r"(lhs.data[i]), [a1] "r"(lhs.data[i + 1]), "d"(b) \
+        : "memory", "flags" \
+      ); \
+    } \
+    for (; i < lhs.data.size(); i++) { \
+      asm volatile( \
+        "mulx %[a], %[low], %[high];" \
+        "add %[tmp], %[low];" \
+        "adc $0, %[high];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "add %[low], %[result];" \
+          "adc $0, %[high];" \
+        ) \
+        "mov %[high], %[tmp];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp] "+r"(tmp), [result] "+m"(result.data[i]) \
+        : [a] "r"(lhs.data[i]), "d"(b) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp; \
+  } else if (rhs.data.size() == 2) { \
+    uint64_t b0 = rhs.data[0]; \
+    uint64_t b1 = rhs.data[1]; \
+    uint64_t tmp0 = 0; \
+    uint64_t tmp1 = 0; \
+    for (; i < lhs.data.size(); i++) { \
+      uint64_t a = lhs.data[i]; \
+      asm volatile( \
+        "mulx %[b0], %[low], %[high];" \
+        "add %[tmp0], %[low];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "adc $0, %[high];" \
+          "add %[low], %[result];" \
+        ) \
+        "mulx %[b1], %[tmp0], %[low];" \
+        "adc %[high], %[tmp0];" \
+        "adc $0, %[low];" \
+        "add %[tmp1], %[tmp0];" \
+        "adc $0, %[low];" \
+        "mov %[low], %[tmp1];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [result] "+m"(result.data[i]) \
+        : [b0] "r"(b0), [b1] "r"(b1), "d"(a) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp0; \
+    result.data[i + 1] = tmp1; \
+  } else if (rhs.data.size() == 3) { \
+    uint64_t b0 = rhs.data[0]; \
+    uint64_t b1 = rhs.data[1]; \
+    uint64_t b2 = rhs.data[2]; \
+    uint64_t tmp0 = 0; \
+    uint64_t tmp1 = 0; \
+    uint64_t tmp2 = 0; \
+    for (; i < lhs.data.size(); i++) { \
+      uint64_t a = lhs.data[i]; \
+      asm volatile( \
+        "mulx %[b0], %[low], %[high];" \
+        "add %[tmp0], %[low];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "adc $0, %[high];" \
+          "add %[low], %[result];" \
+        ) \
+        "mulx %[b1], %[tmp0], %[low];" \
+        "adc %[high], %[tmp0];" \
+        "adc $0, %[low];" \
+        "add %[tmp1], %[tmp0];" \
+        "mulx %[b2], %[tmp1], %[high];" \
+        "adc %[low], %[tmp1];" \
+        "adc $0, %[high];" \
+        "add %[tmp2], %[tmp1];" \
+        "adc $0, %[high];" \
+        "mov %[high], %[tmp2];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [result] "+m"(result.data[i]) \
+        : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), "d"(a) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp0; \
+    result.data[i + 1] = tmp1; \
+    result.data[i + 2] = tmp2; \
+  } else if (rhs.data.size() == 4) { \
+    uint64_t b0 = rhs.data[0]; \
+    uint64_t b1 = rhs.data[1]; \
+    uint64_t b2 = rhs.data[2]; \
+    uint64_t b3 = rhs.data[3]; \
+    uint64_t tmp0 = 0; \
+    uint64_t tmp1 = 0; \
+    uint64_t tmp2 = 0; \
+    uint64_t tmp3 = 0; \
+    for (; i < lhs.data.size(); i++) { \
+      uint64_t a = lhs.data[i]; \
+      asm volatile( \
+        "mulx %[b0], %[low], %[high];" \
+        "add %[tmp0], %[low];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "adc $0, %[high];" \
+          "add %[low], %[result];" \
+        ) \
+        "mulx %[b1], %[tmp0], %[low];" \
+        "adc %[high], %[tmp0];" \
+        "adc $0, %[low];" \
+        "add %[tmp1], %[tmp0];" \
+        "mulx %[b2], %[tmp1], %[high];" \
+        "adc %[low], %[tmp1];" \
+        "adc $0, %[high];" \
+        "add %[tmp2], %[tmp1];" \
+        "mulx %[b3], %[tmp2], %[low];" \
+        "adc %[high], %[tmp2];" \
+        "adc $0, %[low];" \
+        "add %[tmp3], %[tmp2];" \
+        "adc $0, %[low];" \
+        "mov %[low], %[tmp3];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [result] "+m"(result.data[i]) \
+        : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), [b3] "r"(b3), "d"(a) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp0; \
+    result.data[i + 1] = tmp1; \
+    result.data[i + 2] = tmp2; \
+    result.data[i + 3] = tmp3; \
+  } else if (rhs.data.size() == 5) { \
+    /* We don't have enough general-purpose registers in this case, so b4 and tmp4 go to XMM \
+       registers */ \
+    uint64_t b0 = rhs.data[0]; \
+    uint64_t b1 = rhs.data[1]; \
+    uint64_t b2 = rhs.data[2]; \
+    uint64_t b3 = rhs.data[3]; \
+    __m128i b4 = _mm_cvtsi64_si128(rhs.data[4]); \
+    uint64_t tmp0 = 0; \
+    uint64_t tmp1 = 0; \
+    uint64_t tmp2 = 0; \
+    uint64_t tmp3 = 0; \
+    __m128i tmp4 = _mm_setzero_si128(); \
+    for (; i < lhs.data.size(); i++) { \
+      uint64_t a = lhs.data[i]; \
+      asm volatile( \
+        "mulx %[b0], %[low], %[high];" \
+        "add %[tmp0], %[low];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "adc $0, %[high];" \
+          "add %[low], %[result];" \
+        ) \
+        "mulx %[b1], %[tmp0], %[low];" \
+        "adc %[high], %[tmp0];" \
+        "adc $0, %[low];" \
+        "add %[tmp1], %[tmp0];" \
+        "mulx %[b2], %[tmp1], %[high];" \
+        "adc %[low], %[tmp1];" \
+        "adc $0, %[high];" \
+        "add %[tmp2], %[tmp1];" \
+        "mulx %[b3], %[tmp2], %[low];" \
+        "adc %[high], %[tmp2];" \
+        "adc $0, %[low];" \
+        "add %[tmp3], %[tmp2];" \
+        "movq %[b4], %[high];" \
+        "mulx %[high], %[tmp3], %[high];" \
+        "adc %[low], %[tmp3];" \
+        "adc $0, %[high];" \
+        "movq %[tmp4], %[low];" \
+        "add %[low], %[tmp3];" \
+        "adc $0, %[high];" \
+        "movq %[high], %[tmp4];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+x"(tmp4), [result] "+m"(result.data[i]) \
+        : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), [b3] "r"(b3), [b4] "x"(b4), "d"(a) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp0; \
+    result.data[i + 1] = tmp1; \
+    result.data[i + 2] = tmp2; \
+    result.data[i + 3] = tmp3; \
+    result.data[i + 4] = _mm_cvtsi128_si64(tmp4); \
+  } else if (rhs.data.size() == 6) { \
+    /* We don't have enough general-purpose registers in this case, so b3, b4, b5 and tmp5 go to XMM \
+       registers */ \
+    uint64_t b0 = rhs.data[0]; \
+    uint64_t b1 = rhs.data[1]; \
+    uint64_t b2 = rhs.data[2]; \
+    __m128i b3 = _mm_cvtsi64_si128(rhs.data[3]); \
+    __m128i b4 = _mm_cvtsi64_si128(rhs.data[4]); \
+    __m128i b5 = _mm_cvtsi64_si128(rhs.data[5]); \
+    uint64_t tmp0 = 0; \
+    uint64_t tmp1 = 0; \
+    uint64_t tmp2 = 0; \
+    uint64_t tmp3 = 0; \
+    uint64_t tmp4 = 0; \
+    __m128i tmp5 = _mm_setzero_si128(); \
+    for (; i < lhs.data.size(); i++) { \
+      uint64_t a = lhs.data[i]; \
+      asm volatile( \
+        "mulx %[b0], %[low], %[high];" \
+        "add %[tmp0], %[low];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "adc $0, %[high];" \
+          "add %[low], %[result];" \
+        ) \
+        "mulx %[b1], %[tmp0], %[low];" \
+        "adc %[high], %[tmp0];" \
+        "adc $0, %[low];" \
+        "add %[tmp1], %[tmp0];" \
+        "mulx %[b2], %[tmp1], %[high];" \
+        "adc %[low], %[tmp1];" \
+        "adc $0, %[high];" \
+        "add %[tmp2], %[tmp1];" \
+        "movq %[b3], %[low];" \
+        "mulx %[low], %[tmp2], %[low];" \
+        "adc %[high], %[tmp2];" \
+        "adc $0, %[low];" \
+        "add %[tmp3], %[tmp2];" \
+        "movq %[b4], %[high];" \
+        "mulx %[high], %[tmp3], %[high];" \
+        "adc %[low], %[tmp3];" \
+        "adc $0, %[high];" \
+        "add %[tmp4], %[tmp3];" \
+        "movq %[b5], %[low];" \
+        "mulx %[low], %[tmp4], %[low];" \
+        "adc %[high], %[tmp4];" \
+        "adc $0, %[low];" \
+        "movq %[tmp5], %[high];" \
+        "add %[high], %[tmp4];" \
+        "adc $0, %[low];" \
+        "movq %[low], %[tmp5];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+r"(tmp4), [tmp5] "+x"(tmp5), [result] "+m"(result.data[i]) \
+        : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), [b3] "x"(b3), [b4] "x"(b4), [b5] "x"(b5), "d"(a) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp0; \
+    result.data[i + 1] = tmp1; \
+    result.data[i + 2] = tmp2; \
+    result.data[i + 3] = tmp3; \
+    result.data[i + 4] = tmp4; \
+    result.data[i + 5] = _mm_cvtsi128_si64(tmp5); \
+  } else if (rhs.data.size() == 7) { \
+    /* We don't have enough general-purpose registers in this case, so b2, b3, b4, b5, b6 and tmp6 \
+       go to XMM registers */ \
+    uint64_t b0 = rhs.data[0]; \
+    uint64_t b1 = rhs.data[1]; \
+    __m128i b2 = _mm_cvtsi64_si128(rhs.data[2]); \
+    __m128i b3 = _mm_cvtsi64_si128(rhs.data[3]); \
+    __m128i b4 = _mm_cvtsi64_si128(rhs.data[4]); \
+    __m128i b5 = _mm_cvtsi64_si128(rhs.data[5]); \
+    __m128i b6 = _mm_cvtsi64_si128(rhs.data[6]); \
+    uint64_t tmp0 = 0; \
+    uint64_t tmp1 = 0; \
+    uint64_t tmp2 = 0; \
+    uint64_t tmp3 = 0; \
+    uint64_t tmp4 = 0; \
+    uint64_t tmp5 = 0; \
+    __m128i tmp6 = _mm_setzero_si128(); \
+    for (; i < lhs.data.size(); i++) { \
+      uint64_t a = lhs.data[i]; \
+      asm volatile( \
+        "mulx %[b0], %[low], %[high];" \
+        "add %[tmp0], %[low];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "adc $0, %[high];" \
+          "add %[low], %[result];" \
+        ) \
+        "mulx %[b1], %[tmp0], %[low];" \
+        "adc %[high], %[tmp0];" \
+        "adc $0, %[low];" \
+        "add %[tmp1], %[tmp0];" \
+        "movq %[b2], %[high];" \
+        "mulx %[high], %[tmp1], %[high];" \
+        "adc %[low], %[tmp1];" \
+        "adc $0, %[high];" \
+        "add %[tmp2], %[tmp1];" \
+        "movq %[b3], %[low];" \
+        "mulx %[low], %[tmp2], %[low];" \
+        "adc %[high], %[tmp2];" \
+        "adc $0, %[low];" \
+        "add %[tmp3], %[tmp2];" \
+        "movq %[b4], %[high];" \
+        "mulx %[high], %[tmp3], %[high];" \
+        "adc %[low], %[tmp3];" \
+        "adc $0, %[high];" \
+        "add %[tmp4], %[tmp3];" \
+        "movq %[b5], %[low];" \
+        "mulx %[low], %[tmp4], %[low];" \
+        "adc %[high], %[tmp4];" \
+        "adc $0, %[low];" \
+        "add %[tmp5], %[tmp4];" \
+        "movq %[b6], %[high];" \
+        "mulx %[high], %[tmp5], %[high];" \
+        "adc %[low], %[tmp5];" \
+        "adc $0, %[high];" \
+        "movq %[tmp6], %[low];" \
+        "add %[low], %[tmp5];" \
+        "adc $0, %[high];" \
+        "movq %[high], %[tmp6];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+r"(tmp4), [tmp5] "+r"(tmp5), [tmp6] "+x"(tmp6), [result] "+m"(result.data[i]) \
+        : [b0] "r"(b0), [b1] "r"(b1), [b2] "x"(b2), [b3] "x"(b3), [b4] "x"(b4), [b5] "x"(b5), [b6] "x"(b6), "d"(a) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp0; \
+    result.data[i + 1] = tmp1; \
+    result.data[i + 2] = tmp2; \
+    result.data[i + 3] = tmp3; \
+    result.data[i + 4] = tmp4; \
+    result.data[i + 5] = tmp5; \
+    result.data[i + 6] = _mm_cvtsi128_si64(tmp6); \
+  } else if (rhs.data.size() == 8) { \
+    /* We don't have enough general-purpose registers in this case, so b0, b1, b2, b3, b4, b5, b6,
+       b7 and tmp7 go to XMM registers */ \
+    __m128i b0 = _mm_cvtsi64_si128(rhs.data[0]); \
+    __m128i b1 = _mm_cvtsi64_si128(rhs.data[1]); \
+    __m128i b2 = _mm_cvtsi64_si128(rhs.data[2]); \
+    __m128i b3 = _mm_cvtsi64_si128(rhs.data[3]); \
+    __m128i b4 = _mm_cvtsi64_si128(rhs.data[4]); \
+    __m128i b5 = _mm_cvtsi64_si128(rhs.data[5]); \
+    __m128i b6 = _mm_cvtsi64_si128(rhs.data[6]); \
+    __m128i b7 = _mm_cvtsi64_si128(rhs.data[7]); \
+    uint64_t tmp0 = 0; \
+    uint64_t tmp1 = 0; \
+    uint64_t tmp2 = 0; \
+    uint64_t tmp3 = 0; \
+    uint64_t tmp4 = 0; \
+    uint64_t tmp5 = 0; \
+    uint64_t tmp6 = 0; \
+    __m128i tmp7 = _mm_setzero_si128(); \
+    for (; i < lhs.data.size(); i++) { \
+      uint64_t a = lhs.data[i]; \
+      asm volatile( \
+        "movq %[b0], %[high];" \
+        "mulx %[high], %[low], %[high];" \
+        "add %[tmp0], %[low];" \
+        MOV_OR_ADD( \
+          "mov %[low], %[result];", \
+          "adc $0, %[high];" \
+          "add %[low], %[result];" \
+        ) \
+        "movq %[b1], %[low];" \
+        "mulx %[low], %[tmp0], %[low];" \
+        "adc %[high], %[tmp0];" \
+        "adc $0, %[low];" \
+        "add %[tmp1], %[tmp0];" \
+        "movq %[b2], %[high];" \
+        "mulx %[high], %[tmp1], %[high];" \
+        "adc %[low], %[tmp1];" \
+        "adc $0, %[high];" \
+        "add %[tmp2], %[tmp1];" \
+        "movq %[b3], %[low];" \
+        "mulx %[low], %[tmp2], %[low];" \
+        "adc %[high], %[tmp2];" \
+        "adc $0, %[low];" \
+        "add %[tmp3], %[tmp2];" \
+        "movq %[b4], %[high];" \
+        "mulx %[high], %[tmp3], %[high];" \
+        "adc %[low], %[tmp3];" \
+        "adc $0, %[high];" \
+        "add %[tmp4], %[tmp3];" \
+        "movq %[b5], %[low];" \
+        "mulx %[low], %[tmp4], %[low];" \
+        "adc %[high], %[tmp4];" \
+        "adc $0, %[low];" \
+        "add %[tmp5], %[tmp4];" \
+        "movq %[b6], %[high];" \
+        "mulx %[high], %[tmp5], %[high];" \
+        "adc %[low], %[tmp5];" \
+        "adc $0, %[high];" \
+        "movq %[tmp6], %[low];" \
+        "add %[low], %[tmp5];" \
+        "movq %[b7], %[low];" \
+        "mulx %[low], %[tmp6], %[low];" \
+        "adc %[high], %[tmp6];" \
+        "adc $0, %[low];" \
+        "movq %[tmp7], %[high];" \
+        "add %[high], %[tmp6];" \
+        "adc $0, %[low];" \
+        "movq %[low], %[tmp7];" \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+r"(tmp4), [tmp5] "+r"(tmp5), [tmp6] "+r"(tmp6), [tmp7] "+x"(tmp7), [result] "+m"(result.data[i]) \
+        : [b0] "x"(b0), [b1] "x"(b1), [b2] "x"(b2), [b3] "x"(b3), [b4] "x"(b4), [b5] "x"(b5), [b6] "x"(b6), [b7] "x"(b7), "d"(a) \
+        : "memory", "flags" \
+      ); \
+    } \
+    result.data[i] = tmp0; \
+    result.data[i + 1] = tmp1; \
+    result.data[i + 2] = tmp2; \
+    result.data[i + 3] = tmp3; \
+    result.data[i + 4] = tmp4; \
+    result.data[i + 5] = tmp5; \
+    result.data[i + 6] = tmp6; \
+    result.data[i + 7] = _mm_cvtsi128_si64(tmp7); \
+  } else { \
+    MOV_OR_ADD(mul_quadratic, fma_quadratic)(result.slice(0), lhs, rhs.slice(0, 8)); \
+    size_t j = 8; \
+    for (; j + 8 < rhs.data.size(); j += 8) { \
+      fma_quadratic(result.slice(j), lhs, rhs.slice(j, 8)); \
+    } \
+    fma_quadratic(result.slice(j), lhs, rhs.slice(j)); \
   }
-  result.data[lhs.data.size()] = carry;
+
+void fma_quadratic(Ref result, ConstRef lhs, ConstRef rhs) {
+#define MOV_OR_ADD(mov, add) add
+  MUL_QUADRATIC_BODY
+#undef MOV_OR_ADD
 }
-
-__attribute__((noinline)) void mul_quadratic(Ref result, ConstRef lhs, ConstRef rhs) {
-  size_t size = lhs.data.size() + rhs.data.size() - 1;
-
-  uint64_t carry_low = 0;
-  uint64_t carry_high = 0;
-  for (size_t i = 0; i < size; i++) {
-    size_t left = static_cast<size_t>(std::max(static_cast<ssize_t>(i + 1 - rhs.data.size()), 0z));
-    size_t right = std::min(i + 1, lhs.data.size());
-
-    uint64_t sum_low = carry_low;
-    uint64_t sum_mid = carry_high;
-    uint64_t sum_high = 0;
-
-#define LOOP                                                                                       \
-  do {                                                                                             \
-    uint64_t rax = lhs.data[left];                                                                 \
-    asm("mulq %[b];"                                                                               \
-        "add %%rax, %[sum_low];"                                                                   \
-        "adc %%rdx, %[sum_mid];"                                                                   \
-        "adc $0, %[sum_high];"                                                                     \
-        : "+a"(rax), [sum_low] "+r"(sum_low), [sum_mid] "+r"(sum_mid), [sum_high] "+r"(sum_high)   \
-        : [b] "m"(rhs.data[i - left])                                                              \
-        : "flags", "rdx");                                                                         \
-    left++;                                                                                        \
-  } while (0)
-
-    while (left + 8 <= right) {
-      LOOP;
-      LOOP;
-      LOOP;
-      LOOP;
-      LOOP;
-      LOOP;
-      LOOP;
-      LOOP;
-    }
-    while (left < right) {
-      LOOP;
-    }
-
-    result.data[i] = sum_low;
-    carry_low = sum_mid;
-    carry_high = sum_high;
-  }
-
-  if (carry_high > 0) {
-    result.data[size] = carry_low;
-    result.data[size + 1] = carry_high;
-  } else if (carry_low > 0) {
-    result.data[size] = carry_low;
-  }
+void mul_quadratic(Ref result, ConstRef lhs, ConstRef rhs) {
+#define MOV_OR_ADD(mov, add) mov
+  MUL_QUADRATIC_BODY
+#undef MOV_OR_ADD
 }
 
 void mul_karatsuba(Ref result, ConstRef lhs, ConstRef rhs) {
@@ -1719,14 +2095,11 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
 
   if (lhs.data.size() == 1 && rhs.data.size() == 1) {
     mul_1x1(result, lhs, rhs);
-  } else if (rhs.data.size() == 1) {
-    mul_nx1(result, lhs, rhs.data[0]);
-  } else if (lhs.data.size() == 1) {
-    mul_nx1(result, rhs, lhs.data[0]);
-  } else if (std::min(lhs.data.size(), rhs.data.size()) >= 40) {
-    int n_pow = get_fft_n_pow_16bit(lhs, rhs);
-    if (n_pow >= FFT_CUTOFF) {
-      // Large enough to be efficient
+  } else if (std::min(lhs.data.size(), rhs.data.size()) < 40) {
+    mul_quadratic(result, lhs, rhs);
+  } else {
+    if (lhs.data.size() + rhs.data.size() >= 320) {
+      int n_pow = get_fft_n_pow_16bit(lhs, rhs);
       if (n_pow <= FFT_MAX_16BIT) {
         // Small enough to be precise if input is split into 16-bit words
         mul_fft(result, lhs, rhs, n_pow, 16);
@@ -1742,8 +2115,6 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
     } else {
       mul_karatsuba(result, lhs, rhs);
     }
-  } else {
-    mul_quadratic(result, lhs, rhs);
   }
 
   // ensure((lhs % 179) * (rhs % 179) % 179 == result.slice(0, lhs.data.size() + rhs.data.size()) % 179);
