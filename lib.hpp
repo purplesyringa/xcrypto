@@ -37,7 +37,7 @@ struct EXPORT with_base {
 class ConstSpan;
 
 class SmallVec {
-  static constexpr size_t INLINE_STORAGE_SIZE = 8;
+  static constexpr size_t INLINE_STORAGE_SIZE = 48;
 
   uint64_t* _begin;
   size_t _size;
@@ -122,11 +122,13 @@ public:
     }
   }
 
-  void increase_size(size_t new_size) {
-    if (_capacity < new_size) {
-      increase_capacity_to(new_size);
+  void overwrite_zerofill_leaking(size_t size) {
+    if (size > INLINE_STORAGE_SIZE) {
+      _begin = new uint64_t[size];
+      _capacity = size;
     }
-    _size = new_size;
+    memzero64(_begin, size);
+    _size = size;
   }
   void increase_size_zerofill(size_t new_size) {
     if (_capacity < new_size) {
@@ -134,18 +136,6 @@ public:
     }
     memzero64(_begin + _size, new_size - _size);
     _size = new_size;
-  }
-  void ensure_size(size_t new_size) {
-    if (new_size <= _size) {
-      return;
-    }
-    increase_size(new_size);
-  }
-  void ensure_size_zerofill(size_t new_size) {
-    if (new_size <= _size) {
-      return;
-    }
-    increase_size_zerofill(new_size);
   }
   void set_size(size_t size) { _size = size; }
 
@@ -303,12 +293,11 @@ class EXPORT BigInt {
   ConstRef slice(size_t l) const;
   ConstRef slice(size_t l, size_t size) const;
 
-  BigInt(SmallVec data);
-
 public:
   SmallVec data;
 
   BigInt();
+  BigInt(const uint64_t* data, size_t size);
 
   BigInt(__uint128_t value);
   BigInt(uint64_t value);
@@ -381,7 +370,7 @@ public:
   ConstRef slice(size_t l) const { return {ConstSpan{data.data() + l, data.size() - l}}; }
   ConstRef slice(size_t l, size_t size) const { return {ConstSpan{data.data() + l, size}}; }
 
-  explicit operator BigInt() const { return {SmallVec{data.data(), data.size()}}; }
+  explicit operator BigInt() const { return {data.data(), data.size()}; }
 
   ConstRef normalized() {
     ConstSpan tmp = data;
@@ -1390,7 +1379,7 @@ void mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness
   mul_fft_transform_output(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow, word_bitness);
 }
 
-BigInt::BigInt(SmallVec data) : data(data) {}
+BigInt::BigInt(const uint64_t* data, size_t size) : data(data, size) {}
 
 BigInt::BigInt() {}
 
@@ -2125,7 +2114,7 @@ BigInt operator*(ConstRef lhs, ConstRef rhs) {
     return {};
   }
   BigInt result;
-  result.data.increase_size_zerofill(lhs.data.size() + rhs.data.size());
+  result.data.overwrite_zerofill_leaking(lhs.data.size() + rhs.data.size());
   mul_to(result, lhs, rhs);
   result._normalize_nonzero();
   return result;
