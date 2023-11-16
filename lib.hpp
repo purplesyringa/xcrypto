@@ -486,7 +486,7 @@ void add_to(Ref lhs, ConstRef rhs) {
 }
 
 inline constexpr int FFT_RECURSIVE = 10;
-inline constexpr int FFT_MAX_16BIT = 19;  // a bit less than 52 - 16 * 2
+inline constexpr int FFT_MAX_16BIT = 18;  // a bit less than 52 - 16 * 2
 inline constexpr int FFT_MAX_12BIT = 26;  // a bit less than 52 - 12 * 2
 
 struct Complex {
