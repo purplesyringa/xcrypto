@@ -1613,6 +1613,12 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   result.data[1] = static_cast<uint64_t>(product >> 64);
 }
 
+#ifdef __ADX__
+#define IFADX(yes, no) yes
+#else
+#define IFADX(yes, no) no
+#endif
+
 #define MUL_QUADRATIC_BODY \
   size_t i = 0; \
   uint64_t low, high; \
@@ -1620,26 +1626,43 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
   if (rhs.data.size() == 1) { \
     uint64_t b = rhs.data[0]; \
     uint64_t tmp = 0; \
-    for (; i + 2 <= lhs.data.size(); i += 2) { \
+    for (; i + 4 <= lhs.data.size(); i += 4) { \
       asm volatile( \
+        MOV_OR_ADD("", IFADX("xor %[high], %[high];", "")) /* set CF = OF = 0 */ \
         "mulx %[a0], %[low], %[high];" \
-        "add %[tmp], %[low];" \
-        "adc $0, %[high];" \
         MOV_OR_ADD( \
-          "mov %[low], %[result0];", \
-          "add %[low], %[result0];" \
-          "adc $0, %[high];" \
+          "add %[tmp], %[low]; mov %[low], %[result0];", \
+          IFADX( \
+            "adcx %[tmp], %[low]; adox %[result0], %[low]; mov %[low], %[result0];", \
+            "add %[tmp], %[low]; adc $0, %[high]; add %[low], %[result0];" \
+          ) \
         ) \
         "mulx %[a1], %[low], %[tmp];" \
-        "add %[high], %[low];" \
-        "adc $0, %[tmp];" \
         MOV_OR_ADD( \
-          "mov %[low], %[result1];", \
-          "add %[low], %[result1];" \
-          "adc $0, %[tmp];" \
+          "adc %[high], %[low]; mov %[low], %[result1];", \
+          IFADX( \
+            "adcx %[high], %[low]; adox %[result1], %[low]; mov %[low], %[result1];", \
+            "adc %[high], %[low]; adc $0, %[tmp]; add %[low], %[result1];" \
+          ) \
         ) \
-        : [low] "=&r"(low), [high] "=&r"(high), [tmp] "+r"(tmp), [result0] "+m"(result.data[i]), [result1] "=&m"(result.data[i + 1]) \
-        : [a0] "r"(lhs.data[i]), [a1] "r"(lhs.data[i + 1]), "d"(b) \
+        "mulx %[a2], %[low], %[high];" \
+        MOV_OR_ADD( \
+          "add %[tmp], %[low]; mov %[low], %[result2];", \
+          IFADX( \
+            "adcx %[tmp], %[low]; adox %[result2], %[low]; mov %[low], %[result2];", \
+            "adc %[tmp], %[low]; adc $0, %[high]; add %[low], %[result2];" \
+          ) \
+        ) \
+        "mulx %[a3], %[low], %[tmp];" \
+        MOV_OR_ADD( \
+          "adc %[high], %[low]; mov %[low], %[result3]; adc $0, %[tmp];", \
+          IFADX( \
+            "adcx %[high], %[low]; adox %[result3], %[low]; mov %[low], %[result3]; mov $0, %k[low]; seto %b[low]; adcx %[low], %[tmp];", \
+            "adc %[high], %[low]; adc $0, %[tmp]; add %[low], %[result3]; adc $0, %[tmp];" \
+          ) \
+        ) \
+        : [low] "=&r"(low), [high] "=&r"(high), [tmp] "+r"(tmp), [result0] "+m"(result.data[i]), [result1] "=&m"(result.data[i + 1]), [result2] "=&m"(result.data[i + 2]), [result3] "=&m"(result.data[i + 3]) \
+        : [a0] "m"(lhs.data[i]), [a1] "m"(lhs.data[i + 1]), [a2] "m"(lhs.data[i + 2]), [a3] "m"(lhs.data[i + 3]), "d"(b) \
         : "memory", "flags" \
       ); \
     } \
@@ -1655,7 +1678,7 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
         ) \
         "mov %[high], %[tmp];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp] "+r"(tmp), [result] "+m"(result.data[i]) \
-        : [a] "r"(lhs.data[i]), "d"(b) \
+        : [a] "m"(lhs.data[i]), "d"(b) \
         : "memory", "flags" \
       ); \
     } \
@@ -1668,18 +1691,17 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
     for (; i < lhs.data.size(); i++) { \
       uint64_t a = lhs.data[i]; \
       asm volatile( \
+        IFADX("xor %[high], %[high];", "") /* set CF = OF = 0 */ \
         "mulx %[b0], %[low], %[high];" \
-        "add %[tmp0], %[low];" \
-        MOV_OR_ADD( \
-          "mov %[low], %[result];", \
-          "adc $0, %[high];" \
-          "add %[low], %[result];" \
+        IFADX( \
+          "adcx %[tmp0], %[low];" MOV_OR_ADD("", "adox %[result], %[low];") "mov %[low], %[result];", \
+          "add %[tmp0], %[low];" MOV_OR_ADD("mov %[low], %[result];", "adc $0, %[high]; add %[low], %[result];") \
         ) \
         "mulx %[b1], %[tmp0], %[low];" \
-        "adc %[high], %[tmp0];" \
-        "adc $0, %[low];" \
-        "add %[tmp1], %[tmp0];" \
-        "adc $0, %[low];" \
+        IFADX( \
+          "adcx %[high], %[tmp0]; adox %[tmp1], %[tmp0]; mov $0, %k[high]; seto %b[high]; adcx %[high], %[low];", \
+          "adc %[high], %[tmp0]; adc $0, %[low]; add %[tmp1], %[tmp0]; adc $0, %[low];" \
+        ) \
         "mov %[low], %[tmp1];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [result] "+m"(result.data[i]) \
         : [b0] "r"(b0), [b1] "r"(b1), "d"(a) \
@@ -1698,22 +1720,22 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
     for (; i < lhs.data.size(); i++) { \
       uint64_t a = lhs.data[i]; \
       asm volatile( \
+        IFADX("xor %[high], %[high];", "") /* set CF = OF = 0 */ \
         "mulx %[b0], %[low], %[high];" \
-        "add %[tmp0], %[low];" \
-        MOV_OR_ADD( \
-          "mov %[low], %[result];", \
-          "adc $0, %[high];" \
-          "add %[low], %[result];" \
+        IFADX( \
+          "adcx %[tmp0], %[low];" MOV_OR_ADD("", "adox %[result], %[low];") "mov %[low], %[result];", \
+          "add %[tmp0], %[low];" MOV_OR_ADD("mov %[low], %[result];", "adc $0, %[high]; add %[low], %[result];") \
         ) \
         "mulx %[b1], %[tmp0], %[low];" \
-        "adc %[high], %[tmp0];" \
-        "adc $0, %[low];" \
-        "add %[tmp1], %[tmp0];" \
+        IFADX( \
+          "adcx %[high], %[tmp0]; adox %[tmp1], %[tmp0];", \
+          "adc %[high], %[tmp0]; adc $0, %[low]; add %[tmp1], %[tmp0];" \
+        ) \
         "mulx %[b2], %[tmp1], %[high];" \
-        "adc %[low], %[tmp1];" \
-        "adc $0, %[high];" \
-        "add %[tmp2], %[tmp1];" \
-        "adc $0, %[high];" \
+        IFADX( \
+          "adcx %[low], %[tmp1]; adox %[tmp2], %[tmp1]; mov $0, %k[low]; seto %b[low]; adcx %[low], %[high];", \
+          "adc %[low], %[tmp1]; adc $0, %[high]; add %[tmp2], %[tmp1]; adc $0, %[high];" \
+        ) \
         "mov %[high], %[tmp2];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [result] "+m"(result.data[i]) \
         : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), "d"(a) \
@@ -1735,26 +1757,27 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
     for (; i < lhs.data.size(); i++) { \
       uint64_t a = lhs.data[i]; \
       asm volatile( \
+        IFADX("xor %[high], %[high];", "") /* set CF = OF = 0 */ \
         "mulx %[b0], %[low], %[high];" \
-        "add %[tmp0], %[low];" \
-        MOV_OR_ADD( \
-          "mov %[low], %[result];", \
-          "adc $0, %[high];" \
-          "add %[low], %[result];" \
+        IFADX( \
+          "adcx %[tmp0], %[low];" MOV_OR_ADD("", "adox %[result], %[low];") "mov %[low], %[result];", \
+          "add %[tmp0], %[low];" MOV_OR_ADD("mov %[low], %[result];", "adc $0, %[high]; add %[low], %[result];") \
         ) \
         "mulx %[b1], %[tmp0], %[low];" \
-        "adc %[high], %[tmp0];" \
-        "adc $0, %[low];" \
-        "add %[tmp1], %[tmp0];" \
+        IFADX( \
+          "adcx %[high], %[tmp0]; adox %[tmp1], %[tmp0];", \
+          "adc %[high], %[tmp0]; adc $0, %[low]; add %[tmp1], %[tmp0];" \
+        ) \
         "mulx %[b2], %[tmp1], %[high];" \
-        "adc %[low], %[tmp1];" \
-        "adc $0, %[high];" \
-        "add %[tmp2], %[tmp1];" \
+        IFADX( \
+          "adcx %[low], %[tmp1]; adox %[tmp2], %[tmp1];", \
+          "adc %[low], %[tmp1]; adc $0, %[high]; add %[tmp2], %[tmp1];" \
+        ) \
         "mulx %[b3], %[tmp2], %[low];" \
-        "adc %[high], %[tmp2];" \
-        "adc $0, %[low];" \
-        "add %[tmp3], %[tmp2];" \
-        "adc $0, %[low];" \
+        IFADX( \
+          "adcx %[high], %[tmp2]; adox %[tmp3], %[tmp2]; mov $0, %k[high]; seto %b[high]; adcx %[high], %[low];", \
+          "adc %[high], %[tmp2]; adc $0, %[low]; add %[tmp3], %[tmp2]; adc $0, %[low];" \
+        ) \
         "mov %[low], %[tmp3];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [result] "+m"(result.data[i]) \
         : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), [b3] "r"(b3), "d"(a) \
@@ -1781,32 +1804,33 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
     for (; i < lhs.data.size(); i++) { \
       uint64_t a = lhs.data[i]; \
       asm volatile( \
+        IFADX("xor %[high], %[high];", "") /* set CF = OF = 0 */ \
         "mulx %[b0], %[low], %[high];" \
-        "add %[tmp0], %[low];" \
-        MOV_OR_ADD( \
-          "mov %[low], %[result];", \
-          "adc $0, %[high];" \
-          "add %[low], %[result];" \
+        IFADX( \
+          "adcx %[tmp0], %[low];" MOV_OR_ADD("", "adox %[result], %[low];") "mov %[low], %[result];", \
+          "add %[tmp0], %[low];" MOV_OR_ADD("mov %[low], %[result];", "adc $0, %[high]; add %[low], %[result];") \
         ) \
         "mulx %[b1], %[tmp0], %[low];" \
-        "adc %[high], %[tmp0];" \
-        "adc $0, %[low];" \
-        "add %[tmp1], %[tmp0];" \
+        IFADX( \
+          "adcx %[high], %[tmp0]; adox %[tmp1], %[tmp0];", \
+          "adc %[high], %[tmp0]; adc $0, %[low]; add %[tmp1], %[tmp0];" \
+        ) \
         "mulx %[b2], %[tmp1], %[high];" \
-        "adc %[low], %[tmp1];" \
-        "adc $0, %[high];" \
-        "add %[tmp2], %[tmp1];" \
+        IFADX( \
+          "adcx %[low], %[tmp1]; adox %[tmp2], %[tmp1];", \
+          "adc %[low], %[tmp1]; adc $0, %[high]; add %[tmp2], %[tmp1];" \
+        ) \
         "mulx %[b3], %[tmp2], %[low];" \
-        "adc %[high], %[tmp2];" \
-        "adc $0, %[low];" \
-        "add %[tmp3], %[tmp2];" \
+        IFADX( \
+          "adcx %[high], %[tmp2]; adox %[tmp3], %[tmp2];", \
+          "adc %[high], %[tmp2]; adc $0, %[low]; add %[tmp3], %[tmp2];" \
+        ) \
         "movq %[b4], %[high];" \
         "mulx %[high], %[tmp3], %[high];" \
-        "adc %[low], %[tmp3];" \
-        "adc $0, %[high];" \
-        "movq %[tmp4], %[low];" \
-        "add %[low], %[tmp3];" \
-        "adc $0, %[high];" \
+        IFADX( \
+          "adcx %[low], %[tmp3]; movq %[tmp4], %[low]; adox %[low], %[tmp3]; mov $0, %k[low]; seto %b[low]; adcx %[low], %[high];", \
+          "adc %[low], %[tmp3]; adc $0, %[high]; movq %[tmp4], %[low]; add %[low], %[tmp3]; adc $0, %[high];" \
+        ) \
         "movq %[high], %[tmp4];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+x"(tmp4), [result] "+m"(result.data[i]) \
         : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), [b3] "r"(b3), [b4] "x"(b4), "d"(a) \
@@ -1836,38 +1860,40 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
     for (; i < lhs.data.size(); i++) { \
       uint64_t a = lhs.data[i]; \
       asm volatile( \
+        IFADX("xor %[high], %[high];", "") /* set CF = OF = 0 */ \
         "mulx %[b0], %[low], %[high];" \
-        "add %[tmp0], %[low];" \
-        MOV_OR_ADD( \
-          "mov %[low], %[result];", \
-          "adc $0, %[high];" \
-          "add %[low], %[result];" \
+        IFADX( \
+          "adcx %[tmp0], %[low];" MOV_OR_ADD("", "adox %[result], %[low];") "mov %[low], %[result];", \
+          "add %[tmp0], %[low];" MOV_OR_ADD("mov %[low], %[result];", "adc $0, %[high]; add %[low], %[result];") \
         ) \
         "mulx %[b1], %[tmp0], %[low];" \
-        "adc %[high], %[tmp0];" \
-        "adc $0, %[low];" \
-        "add %[tmp1], %[tmp0];" \
+        IFADX( \
+          "adcx %[high], %[tmp0]; adox %[tmp1], %[tmp0];", \
+          "adc %[high], %[tmp0]; adc $0, %[low]; add %[tmp1], %[tmp0];" \
+        ) \
         "mulx %[b2], %[tmp1], %[high];" \
-        "adc %[low], %[tmp1];" \
-        "adc $0, %[high];" \
-        "add %[tmp2], %[tmp1];" \
+        IFADX( \
+          "adcx %[low], %[tmp1]; adox %[tmp2], %[tmp1];", \
+          "adc %[low], %[tmp1]; adc $0, %[high]; add %[tmp2], %[tmp1];" \
+        ) \
         "movq %[b3], %[low];" \
         "mulx %[low], %[tmp2], %[low];" \
-        "adc %[high], %[tmp2];" \
-        "adc $0, %[low];" \
-        "add %[tmp3], %[tmp2];" \
+        IFADX( \
+          "adcx %[high], %[tmp2]; adox %[tmp3], %[tmp2];", \
+          "adc %[high], %[tmp2]; adc $0, %[low]; add %[tmp3], %[tmp2];" \
+        ) \
         "movq %[b4], %[high];" \
         "mulx %[high], %[tmp3], %[high];" \
-        "adc %[low], %[tmp3];" \
-        "adc $0, %[high];" \
-        "add %[tmp4], %[tmp3];" \
+        IFADX( \
+          "adcx %[low], %[tmp3]; adox %[tmp4], %[tmp3];", \
+          "adc %[low], %[tmp3]; adc $0, %[high]; add %[tmp4], %[tmp3];" \
+        ) \
         "movq %[b5], %[low];" \
         "mulx %[low], %[tmp4], %[low];" \
-        "adc %[high], %[tmp4];" \
-        "adc $0, %[low];" \
-        "movq %[tmp5], %[high];" \
-        "add %[high], %[tmp4];" \
-        "adc $0, %[low];" \
+        IFADX( \
+          "adcx %[high], %[tmp4]; movq %[tmp5], %[high]; adox %[high], %[tmp4]; mov $0, %k[high]; seto %b[high]; adcx %[high], %[low];", \
+          "adc %[high], %[tmp4]; adc $0, %[low]; movq %[tmp5], %[high]; add %[high], %[tmp4]; adc $0, %[low];" \
+        ) \
         "movq %[low], %[tmp5];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+r"(tmp4), [tmp5] "+x"(tmp5), [result] "+m"(result.data[i]) \
         : [b0] "r"(b0), [b1] "r"(b1), [b2] "r"(b2), [b3] "x"(b3), [b4] "x"(b4), [b5] "x"(b5), "d"(a) \
@@ -1900,44 +1926,47 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
     for (; i < lhs.data.size(); i++) { \
       uint64_t a = lhs.data[i]; \
       asm volatile( \
+        IFADX("xor %[high], %[high];", "") /* set CF = OF = 0 */ \
         "mulx %[b0], %[low], %[high];" \
-        "add %[tmp0], %[low];" \
-        MOV_OR_ADD( \
-          "mov %[low], %[result];", \
-          "adc $0, %[high];" \
-          "add %[low], %[result];" \
+        IFADX( \
+          "adcx %[tmp0], %[low];" MOV_OR_ADD("", "adox %[result], %[low];") "mov %[low], %[result];", \
+          "add %[tmp0], %[low];" MOV_OR_ADD("mov %[low], %[result];", "adc $0, %[high]; add %[low], %[result];") \
         ) \
         "mulx %[b1], %[tmp0], %[low];" \
-        "adc %[high], %[tmp0];" \
-        "adc $0, %[low];" \
-        "add %[tmp1], %[tmp0];" \
+        IFADX( \
+          "adcx %[high], %[tmp0]; adox %[tmp1], %[tmp0];", \
+          "adc %[high], %[tmp0]; adc $0, %[low]; add %[tmp1], %[tmp0];" \
+        ) \
         "movq %[b2], %[high];" \
         "mulx %[high], %[tmp1], %[high];" \
-        "adc %[low], %[tmp1];" \
-        "adc $0, %[high];" \
-        "add %[tmp2], %[tmp1];" \
+        IFADX( \
+          "adcx %[low], %[tmp1]; adox %[tmp2], %[tmp1];", \
+          "adc %[low], %[tmp1]; adc $0, %[high]; add %[tmp2], %[tmp1];" \
+        ) \
         "movq %[b3], %[low];" \
         "mulx %[low], %[tmp2], %[low];" \
-        "adc %[high], %[tmp2];" \
-        "adc $0, %[low];" \
-        "add %[tmp3], %[tmp2];" \
+        IFADX( \
+          "adcx %[high], %[tmp2]; adox %[tmp3], %[tmp2];", \
+          "adc %[high], %[tmp2]; adc $0, %[low]; add %[tmp3], %[tmp2];" \
+        ) \
         "movq %[b4], %[high];" \
         "mulx %[high], %[tmp3], %[high];" \
-        "adc %[low], %[tmp3];" \
-        "adc $0, %[high];" \
-        "add %[tmp4], %[tmp3];" \
+        IFADX( \
+          "adcx %[low], %[tmp3]; adox %[tmp4], %[tmp3];", \
+          "adc %[low], %[tmp3]; adc $0, %[high]; add %[tmp4], %[tmp3];" \
+        ) \
         "movq %[b5], %[low];" \
         "mulx %[low], %[tmp4], %[low];" \
-        "adc %[high], %[tmp4];" \
-        "adc $0, %[low];" \
-        "add %[tmp5], %[tmp4];" \
+        IFADX( \
+          "adcx %[high], %[tmp4]; adox %[tmp5], %[tmp4];", \
+          "adc %[high], %[tmp4]; adc $0, %[low]; add %[tmp5], %[tmp4];" \
+        ) \
         "movq %[b6], %[high];" \
         "mulx %[high], %[tmp5], %[high];" \
-        "adc %[low], %[tmp5];" \
-        "adc $0, %[high];" \
-        "movq %[tmp6], %[low];" \
-        "add %[low], %[tmp5];" \
-        "adc $0, %[high];" \
+        IFADX( \
+          "adcx %[low], %[tmp5]; movq %[tmp6], %[low]; adox %[low], %[tmp5]; mov $0, %k[low]; seto %b[low]; adcx %[low], %[high];", \
+          "adc %[low], %[tmp5]; adc $0, %[high]; movq %[tmp6], %[low]; add %[low], %[tmp5]; adc $0, %[high];" \
+        ) \
         "movq %[high], %[tmp6];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+r"(tmp4), [tmp5] "+r"(tmp5), [tmp6] "+x"(tmp6), [result] "+m"(result.data[i]) \
         : [b0] "r"(b0), [b1] "r"(b1), [b2] "x"(b2), [b3] "x"(b3), [b4] "x"(b4), [b5] "x"(b5), [b6] "x"(b6), "d"(a) \
@@ -1973,52 +2002,55 @@ void mul_1x1(Ref result, ConstRef lhs, ConstRef rhs) {
     for (; i < lhs.data.size(); i++) { \
       uint64_t a = lhs.data[i]; \
       asm volatile( \
+        IFADX("xor %[high], %[high];", "") /* set CF = OF = 0 */ \
         "movq %[b0], %[high];" \
         "mulx %[high], %[low], %[high];" \
-        "add %[tmp0], %[low];" \
-        MOV_OR_ADD( \
-          "mov %[low], %[result];", \
-          "adc $0, %[high];" \
-          "add %[low], %[result];" \
+        IFADX( \
+          "adcx %[tmp0], %[low];" MOV_OR_ADD("", "adox %[result], %[low];") "mov %[low], %[result];", \
+          "add %[tmp0], %[low];" MOV_OR_ADD("mov %[low], %[result];", "adc $0, %[high]; add %[low], %[result];") \
         ) \
         "movq %[b1], %[low];" \
         "mulx %[low], %[tmp0], %[low];" \
-        "adc %[high], %[tmp0];" \
-        "adc $0, %[low];" \
-        "add %[tmp1], %[tmp0];" \
+        IFADX( \
+          "adcx %[high], %[tmp0]; adox %[tmp1], %[tmp0];", \
+          "adc %[high], %[tmp0]; adc $0, %[low]; add %[tmp1], %[tmp0];" \
+        ) \
         "movq %[b2], %[high];" \
         "mulx %[high], %[tmp1], %[high];" \
-        "adc %[low], %[tmp1];" \
-        "adc $0, %[high];" \
-        "add %[tmp2], %[tmp1];" \
+        IFADX( \
+          "adcx %[low], %[tmp1]; adox %[tmp2], %[tmp1];", \
+          "adc %[low], %[tmp1]; adc $0, %[high]; add %[tmp2], %[tmp1];" \
+        ) \
         "movq %[b3], %[low];" \
         "mulx %[low], %[tmp2], %[low];" \
-        "adc %[high], %[tmp2];" \
-        "adc $0, %[low];" \
-        "add %[tmp3], %[tmp2];" \
+        IFADX( \
+          "adcx %[high], %[tmp2]; adox %[tmp3], %[tmp2];", \
+          "adc %[high], %[tmp2]; adc $0, %[low]; add %[tmp3], %[tmp2];" \
+        ) \
         "movq %[b4], %[high];" \
         "mulx %[high], %[tmp3], %[high];" \
-        "adc %[low], %[tmp3];" \
-        "adc $0, %[high];" \
-        "add %[tmp4], %[tmp3];" \
+        IFADX( \
+          "adcx %[low], %[tmp3]; adox %[tmp4], %[tmp3];", \
+          "adc %[low], %[tmp3]; adc $0, %[high]; add %[tmp4], %[tmp3];" \
+        ) \
         "movq %[b5], %[low];" \
         "mulx %[low], %[tmp4], %[low];" \
-        "adc %[high], %[tmp4];" \
-        "adc $0, %[low];" \
-        "add %[tmp5], %[tmp4];" \
+        IFADX( \
+          "adcx %[high], %[tmp4]; adox %[tmp5], %[tmp4];", \
+          "adc %[high], %[tmp4]; adc $0, %[low]; add %[tmp5], %[tmp4];" \
+        ) \
         "movq %[b6], %[high];" \
         "mulx %[high], %[tmp5], %[high];" \
-        "adc %[low], %[tmp5];" \
-        "adc $0, %[high];" \
-        "movq %[tmp6], %[low];" \
-        "add %[low], %[tmp5];" \
+        IFADX( \
+          "adcx %[low], %[tmp5]; adox %[tmp6], %[tmp5];", \
+          "adc %[low], %[tmp5]; adc $0, %[high]; add %[tmp6], %[tmp5];" \
+        ) \
         "movq %[b7], %[low];" \
         "mulx %[low], %[tmp6], %[low];" \
-        "adc %[high], %[tmp6];" \
-        "adc $0, %[low];" \
-        "movq %[tmp7], %[high];" \
-        "add %[high], %[tmp6];" \
-        "adc $0, %[low];" \
+        IFADX( \
+          "adcx %[high], %[tmp6]; movq %[tmp7], %[high]; adox %[high], %[tmp6]; mov $0, %k[high]; seto %b[high]; adcx %[high], %[low];", \
+          "adc %[high], %[tmp6]; adc $0, %[low]; movq %[tmp7], %[high]; add %[high], %[tmp6]; adc $0, %[low];" \
+        ) \
         "movq %[low], %[tmp7];" \
         : [low] "=&r"(low), [high] "=&r"(high), [tmp0] "+r"(tmp0), [tmp1] "+r"(tmp1), [tmp2] "+r"(tmp2), [tmp3] "+r"(tmp3), [tmp4] "+r"(tmp4), [tmp5] "+r"(tmp5), [tmp6] "+r"(tmp6), [tmp7] "+x"(tmp7), [result] "+m"(result.data[i]) \
         : [b0] "x"(b0), [b1] "x"(b1), [b2] "x"(b2), [b3] "x"(b3), [b4] "x"(b4), [b5] "x"(b5), [b6] "x"(b6), [b7] "x"(b7), "d"(a) \
