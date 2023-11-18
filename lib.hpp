@@ -490,6 +490,7 @@ void add_to(Ref lhs, ConstRef rhs) {
 
 inline constexpr int FFT_RECURSIVE = 10;
 inline constexpr int FFT_MAX_16BIT = 18;  // a bit less than 52 - 16 * 2
+inline constexpr int FFT_MAX_16BIT_RELIABLE = 16;  // 2 bits below known counter-example
 inline constexpr int FFT_MAX_12BIT = 26;  // a bit less than 52 - 12 * 2
 
 struct Complex {
@@ -1040,36 +1041,73 @@ __m256d u64_to_double(__m256i integers) {
   return _mm256_sub_pd(_mm256_xor_pd(_mm256_castsi256_pd(integers), magic), magic);
 }
 
-struct PolynomialEvaluator {
-  __m256i value_vec;
-  __m256i pointi_vec;
-  __m256i point4_vec;
+// Arithmetic mod 2^64 - 1
+struct Mod {
+  // For 0, may be either 0 or 2^64 - 1
+  uint64_t value;
 
-  PolynomialEvaluator(uint32_t point, std::array<int, 4> order) {
-    value_vec = _mm256_setzero_si256();
-    std::array<uint32_t, 4> powers = {1, point, point * point, point * point * point};
-    pointi_vec = _mm256_set_epi64x(powers[order[3]], powers[order[2]], powers[order[1]], powers[order[0]]);
-    point4_vec = _mm256_set1_epi64x(point * point * point * point);
+  Mod operator*(Mod rhs) const {
+    __uint128_t prod = (__uint128_t)value * rhs.value;
+    unsigned long long result;
+    result += __builtin_uaddll_overflow(prod, prod >> 64, &result);
+    return {result};
   }
-
-  void supply(__m256i words) {
-    value_vec = _mm256_add_epi32(value_vec, _mm256_mul_epu32(words, pointi_vec));
-    pointi_vec = _mm256_mul_epu32(pointi_vec, point4_vec);
+  Mod operator+(Mod rhs) const {
+    uint64_t sum;
+    sum += __builtin_add_overflow(value, rhs.value, &sum);
+    return {sum};
   }
-
-  uint32_t get() const {
-    return value_vec[0] + value_vec[1] + value_vec[2] + value_vec[3];
+  bool operator==(Mod rhs) const {
+    uint64_t diff = value - rhs.value;
+    return diff == 0 || diff == -1ULL;
   }
 };
 
-std::pair<ComplexArray, uint32_t> mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness, uint32_t point) {
+template<bool VerificationNoOp>
+struct PolynomialEvaluator {
+  std::array<Mod, 4> value_vec{0, 0, 0, 0};
+  Mod point, pointi, point4;
+
+  PolynomialEvaluator(Mod point) : point(point) {
+    pointi = Mod{1};
+    point4 = point * point * point * point;
+  }
+
+  void supply(__m256i words) {
+    value_vec[0] = value_vec[0] + Mod{static_cast<uint64_t>(words[0])} * pointi;
+    value_vec[1] = value_vec[1] + Mod{static_cast<uint64_t>(words[1])} * pointi;
+    value_vec[2] = value_vec[2] + Mod{static_cast<uint64_t>(words[2])} * pointi;
+    value_vec[3] = value_vec[3] + Mod{static_cast<uint64_t>(words[3])} * pointi;
+    pointi = pointi * point4;
+  }
+
+  Mod get(std::array<int, 4> indexes) const {
+    Mod value = value_vec[indexes[3]];
+    value = (value * point) + value_vec[indexes[2]];
+    value = (value * point) + value_vec[indexes[1]];
+    value = (value * point) + value_vec[indexes[0]];
+    return value;
+  }
+};
+
+template<>
+struct PolynomialEvaluator<true> {
+  PolynomialEvaluator(Mod point) {}
+  void supply(__m256i words) {}
+  Mod get(std::array<int, 4> indexes) const {
+    return {0};
+  }
+};
+
+template<bool VerificationNoOp>
+std::pair<ComplexArray, Mod> mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness, Mod point) {
   size_t n = 1uz << n_pow;
 
   ComplexArray input_fft(n);
 
   // Split into words
   size_t k = 0;
-  PolynomialEvaluator ev(point, {0, 2, 1, 3});
+  PolynomialEvaluator<VerificationNoOp> ev(point);
   auto write_words = [&](__m256i words) {
     ev.supply(words);
     input_fft.write2(k * 2, Complex2::from_continuous(u64_to_double(words)));
@@ -1121,7 +1159,7 @@ std::pair<ComplexArray, uint32_t> mul_fft_transform_input(ConstRef input, int n_
 
   fft_dif(input_fft, n_pow, 0);
 
-  return {std::move(input_fft), ev.get()};
+  return {std::move(input_fft), ev.get({0, 2, 1, 3})};
 }
 
 ComplexArray mul_fft_middle_end(ComplexArray lhs_fft_dif, ComplexArray rhs_fft_dif, int n_pow) {
@@ -1170,7 +1208,8 @@ ComplexArray mul_fft_middle_end(ComplexArray lhs_fft_dif, ComplexArray rhs_fft_d
   return prod_fft_dif;
 }
 
-uint32_t mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, int word_bitness, uint32_t point) {
+template<bool VerificationNoOp>
+Mod mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, int word_bitness, Mod point) {
   size_t n = 1uz << n_pow;
   __m256d magic = _mm256_set1_pd(0x1p52 * n);
 
@@ -1178,7 +1217,7 @@ uint32_t mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_po
 
   uint64_t carry = 0;
 
-  PolynomialEvaluator ev(point, {0, 1, 2, 3});
+  PolynomialEvaluator<VerificationNoOp> ev(point);
   auto get_word = [&](size_t k) {
     __m256i word = _mm256_castpd_si256(
       _mm256_xor_pd(
@@ -1242,11 +1281,12 @@ uint32_t mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_po
 
   ensure(carry == 0);
 
-  return ev.get();
+  return ev.get({0, 1, 2, 3});
 }
 
 std::ostream& operator<<(std::ostream& out, ConstRef rhs);
 
+template<bool VerificationNoOp>
 bool mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness) {
   // We use a trick to compute n-sized FFT of real-valued input using a single n/2-sized FFT as
   // follows.
@@ -1390,14 +1430,23 @@ bool mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness
   // This also gives a way to interate through k and obtain the index without any additional
   // computations. As there are O(log n) such segments, there should only be O(log n) cache misses
   // before the predictor aligns to the next segment.
-  static thread_local std::mt19937 point_generator(std::random_device{}());
   ensure_twiddle_factors(n_pow);
-  // Force odd point to make sure single-bit errors in higher words are always detected
-  uint64_t point = point_generator() | 1;
-  auto [lhs_fft_dif, lhs_value] = mul_fft_transform_input(lhs, n_pow, word_bitness, point);
-  auto [rhs_fft_dif, rhs_value] = mul_fft_transform_input(rhs, n_pow, word_bitness, point);
+  // Treating the polynomials as mod 2^64 - 1, evaluate them at a point. This ensures that:
+  // a) single-coefficient errors are reliably detected,
+  // b) arbitrary errors are detected with probability at least 1 - n / (largest prime factor of
+  //    2^64 - 1) = 1 - n / 6700417 ~ 0.96 for the upper limit on n for 16 bits,
+  // c) random errors are detected with probability 1 - n / (2^64 - 1) = 1 - 1.5e-14.
+  // This is enough to counter all known counter-examples and provide sufficient guarantees for
+  // unknown counter-examples.
+  Mod point;
+  if constexpr (!VerificationNoOp) {
+    static thread_local std::mt19937_64 point_generator(std::random_device{}());
+    point = {point_generator()};
+  }
+  auto [lhs_fft_dif, lhs_value] = mul_fft_transform_input<VerificationNoOp>(lhs, n_pow, word_bitness, point);
+  auto [rhs_fft_dif, rhs_value] = mul_fft_transform_input<VerificationNoOp>(rhs, n_pow, word_bitness, point);
   ComplexArray prod_fft_dif = mul_fft_middle_end(std::move(lhs_fft_dif), std::move(rhs_fft_dif), n_pow);
-  uint32_t prod_value = mul_fft_transform_output(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow, word_bitness, point);
+  Mod prod_value = mul_fft_transform_output<VerificationNoOp>(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow, word_bitness, point);
   return prod_value == lhs_value * rhs_value;
 }
 
@@ -2143,9 +2192,14 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
   } else {
     if (lhs.data.size() + rhs.data.size() >= 320) {
       int n_pow = get_fft_n_pow_16bit(lhs, rhs);
-      if (n_pow <= FFT_MAX_16BIT) {
+      if (n_pow <= FFT_MAX_16BIT_RELIABLE) {
         // Small enough to be precise if input is split into 16-bit words
-        if (mul_fft(result, lhs, rhs, n_pow, 16)) {
+        mul_fft<true>(result, lhs, rhs, n_pow, 16);
+        return;
+      }
+      if (n_pow <= FFT_MAX_16BIT) {
+        // Small enough to be precise almost always if input is split into 16-bit words
+        if (mul_fft<false>(result, lhs, rhs, n_pow, 16)) {
           return;
         }
         // Possibly malicious input, check failed
@@ -2153,10 +2207,9 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
       // Have to use 12 bits
       n_pow = get_fft_n_pow_12bit(lhs, rhs);
       ensure(n_pow <= FFT_MAX_12BIT);  // XXX: how do we handle larger numbers?
-      if (mul_fft(result, lhs, rhs, n_pow, 12)) {
-        return;
-      }
-      // Possibly malicious input, check failed
+      mul_fft<true>(result, lhs, rhs, n_pow, 12);
+      // No known counter-examples
+      return;
     }
     if (lhs.data.size() * 2 < rhs.data.size()) {
       mul_disproportional(result, lhs, rhs);
