@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdint.h>
 #include <string_view>
 #include <vector>
@@ -716,7 +718,8 @@ ComplexArray construct_initial_twiddles_bitreversed() {
 }
 
 inline ComplexArray twiddles_bitreversed = construct_initial_twiddles_bitreversed();
-inline int twiddles_n_pow = 3;
+inline std::atomic<int> twiddles_n_pow = 3;
+inline std::mutex twiddles_mutex;
 
 uint32_t bitreverse(uint32_t k, int n_pow) {
   k <<= 32 - n_pow;
@@ -729,7 +732,14 @@ uint32_t bitreverse(uint32_t k, int n_pow) {
 }
 
 void ensure_twiddle_factors(int want_n_pow) {
-  if (twiddles_n_pow >= want_n_pow) {
+  if (twiddles_n_pow.load(std::memory_order_acquire) >= want_n_pow) {
+    return;
+  }
+
+  std::lock_guard lock(twiddles_mutex);
+
+  int cur_twiddles_n_pow = twiddles_n_pow.load(std::memory_order_relaxed);
+  if (cur_twiddles_n_pow >= want_n_pow) {
     return;
   }
 
@@ -737,7 +747,7 @@ void ensure_twiddle_factors(int want_n_pow) {
 
   // twiddle_bitreversed doesn't depend on n (to be more specific, twiddle_bitreversed of a lesser n
   // is a prefix of twiddle_bitreversed of a larger n)
-  size_t old_n = 1uz << twiddles_n_pow;
+  size_t old_n = 1uz << cur_twiddles_n_pow;
   size_t new_n = 1uz << want_n_pow;
   ComplexArray new_twiddles_bitreversed(new_n / 2);
   memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed.data),
@@ -753,7 +763,7 @@ void ensure_twiddle_factors(int want_n_pow) {
     twiddles_bitreversed.write1(2 * k + 1, {-s, c});
   }
 
-  twiddles_n_pow = want_n_pow;
+  twiddles_n_pow.store(want_n_pow, std::memory_order_relaxed);
 }
 
 int get_fft_n_pow_16bit(ConstRef lhs, ConstRef rhs) {
