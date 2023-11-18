@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <stdint.h>
 #include <string_view>
 #include <vector>
@@ -1039,28 +1040,47 @@ __m256d u64_to_double(__m256i integers) {
   return _mm256_sub_pd(_mm256_xor_pd(_mm256_castsi256_pd(integers), magic), magic);
 }
 
-ComplexArray mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness) {
+struct PolynomialEvaluator {
+  __m256i value_vec;
+  __m256i pointi_vec;
+  __m256i point4_vec;
+
+  PolynomialEvaluator(uint32_t point, std::array<int, 4> order) {
+    value_vec = _mm256_setzero_si256();
+    std::array<uint32_t, 4> powers = {1, point, point * point, point * point * point};
+    pointi_vec = _mm256_set_epi64x(powers[order[3]], powers[order[2]], powers[order[1]], powers[order[0]]);
+    point4_vec = _mm256_set1_epi64x(point * point * point * point);
+  }
+
+  void supply(__m256i words) {
+    value_vec = _mm256_add_epi32(value_vec, _mm256_mul_epu32(words, pointi_vec));
+    pointi_vec = _mm256_mul_epu32(pointi_vec, point4_vec);
+  }
+
+  uint32_t get() const {
+    return value_vec[0] + value_vec[1] + value_vec[2] + value_vec[3];
+  }
+};
+
+std::pair<ComplexArray, uint32_t> mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness, uint32_t point) {
   size_t n = 1uz << n_pow;
 
   ComplexArray input_fft(n);
 
   // Split into words
   size_t k = 0;
+  PolynomialEvaluator ev(point, {0, 2, 1, 3});
+  auto write_words = [&](__m256i words) {
+    ev.supply(words);
+    input_fft.write2(k * 2, Complex2::from_continuous(u64_to_double(words)));
+  };
   if (word_bitness == 16) {
     for (; k < input.data.size(); k++) {
-      input_fft.write2(
-        k * 2,
-        Complex2::from_continuous(
-          u64_to_double(
-            _mm256_blend_epi16(
-              _mm256_setzero_si256(),
-              _mm256_srlv_epi64(
-                _mm256_set1_epi64x(input.data[k]),
-                _mm256_set_epi64x(48, 16, 32, 0)
-              ),
-              0x11
-            )
-          )
+      write_words(
+        _mm256_blend_epi16(
+          _mm256_setzero_si256(),
+          _mm256_srlv_epi64(_mm256_set1_epi64x(input.data[k]), _mm256_set_epi64x(48, 16, 32, 0)),
+          0x11
         )
       );
     }
@@ -1072,18 +1092,10 @@ ComplexArray mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness
       uint64_t word;
       std::memcpy(&word, &data[k * 3], 8);
       // Split into 12-bit parts
-      input_fft.write2(
-        k * 2,
-        Complex2::from_continuous(
-          u64_to_double(
-            _mm256_and_si256(
-              _mm256_srlv_epi64(
-                _mm256_set1_epi64x(word),
-                _mm256_set_epi64x(36, 12, 24, 0)
-              ),
-              _mm256_set1_epi64x(0xfff)
-            )
-          )
+      write_words(
+        _mm256_and_si256(
+          _mm256_srlv_epi64(_mm256_set1_epi64x(word), _mm256_set_epi64x(36, 12, 24, 0)),
+          _mm256_set1_epi64x(0xfff)
         )
       );
     }
@@ -1094,18 +1106,10 @@ ComplexArray mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness
     word = (word << 16) | (k * 3 + 1 < input.data.size() * 4 ? data[k * 3 + 1] : 0);
     word = (word << 16) | data[k * 3];
     // Split into 12-bit parts
-    input_fft.write2(
-      k * 2,
-      Complex2::from_continuous(
-        u64_to_double(
-          _mm256_and_si256(
-            _mm256_srlv_epi64(
-              _mm256_set1_epi64x(word),
-              _mm256_set_epi64x(36, 12, 24, 0)
-            ),
-            _mm256_set1_epi64x(0xfff)
-          )
-        )
+    write_words(
+      _mm256_and_si256(
+        _mm256_srlv_epi64(_mm256_set1_epi64x(word), _mm256_set_epi64x(36, 12, 24, 0)),
+        _mm256_set1_epi64x(0xfff)
       )
     );
     k++;
@@ -1117,7 +1121,7 @@ ComplexArray mul_fft_transform_input(ConstRef input, int n_pow, int word_bitness
 
   fft_dif(input_fft, n_pow, 0);
 
-  return input_fft;
+  return {std::move(input_fft), ev.get()};
 }
 
 ComplexArray mul_fft_middle_end(ComplexArray lhs_fft_dif, ComplexArray rhs_fft_dif, int n_pow) {
@@ -1166,7 +1170,7 @@ ComplexArray mul_fft_middle_end(ComplexArray lhs_fft_dif, ComplexArray rhs_fft_d
   return prod_fft_dif;
 }
 
-void mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, int word_bitness) {
+uint32_t mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, int word_bitness, uint32_t point) {
   size_t n = 1uz << n_pow;
   __m256d magic = _mm256_set1_pd(0x1p52 * n);
 
@@ -1174,8 +1178,9 @@ void mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, i
 
   uint64_t carry = 0;
 
+  PolynomialEvaluator ev(point, {0, 1, 2, 3});
   auto get_word = [&](size_t k) {
-    return _mm256_castpd_si256(
+    __m256i word = _mm256_castpd_si256(
       _mm256_xor_pd(
         _mm256_add_pd(
           _mm256_andnot_pd(_mm256_set1_pd(-0.), prod_fft_dif.read2(2 * k).to_interleaved()),
@@ -1184,6 +1189,8 @@ void mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, i
         magic
       )
     );
+    ev.supply(word);
+    return word;
   };
 
   if (word_bitness == 16) {
@@ -1234,11 +1241,13 @@ void mul_fft_transform_output(Ref result, ComplexSpan prod_fft_dif, int n_pow, i
   }
 
   ensure(carry == 0);
+
+  return ev.get();
 }
 
 std::ostream& operator<<(std::ostream& out, ConstRef rhs);
 
-void mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness) {
+bool mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness) {
   // We use a trick to compute n-sized FFT of real-valued input using a single n/2-sized FFT as
   // follows.
   //
@@ -1381,12 +1390,15 @@ void mul_fft(Ref result, ConstRef lhs, ConstRef rhs, int n_pow, int word_bitness
   // This also gives a way to interate through k and obtain the index without any additional
   // computations. As there are O(log n) such segments, there should only be O(log n) cache misses
   // before the predictor aligns to the next segment.
-
+  static thread_local std::mt19937 point_generator(std::random_device{}());
   ensure_twiddle_factors(n_pow);
-  ComplexArray lhs_fft_dif = mul_fft_transform_input(lhs, n_pow, word_bitness);
-  ComplexArray rhs_fft_dif = mul_fft_transform_input(rhs, n_pow, word_bitness);
+  // Force odd point to make sure single-bit errors in higher words are always detected
+  uint64_t point = point_generator() | 1;
+  auto [lhs_fft_dif, lhs_value] = mul_fft_transform_input(lhs, n_pow, word_bitness, point);
+  auto [rhs_fft_dif, rhs_value] = mul_fft_transform_input(rhs, n_pow, word_bitness, point);
   ComplexArray prod_fft_dif = mul_fft_middle_end(std::move(lhs_fft_dif), std::move(rhs_fft_dif), n_pow);
-  mul_fft_transform_output(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow, word_bitness);
+  uint32_t prod_value = mul_fft_transform_output(result.slice(0, lhs.data.size() + rhs.data.size()), prod_fft_dif, n_pow, word_bitness, point);
+  return prod_value == lhs_value * rhs_value;
 }
 
 BigInt::BigInt(const uint64_t* data, size_t size) : data(data, size) {}
@@ -2133,13 +2145,20 @@ void mul_to(Ref result, ConstRef lhs, ConstRef rhs) {
       int n_pow = get_fft_n_pow_16bit(lhs, rhs);
       if (n_pow <= FFT_MAX_16BIT) {
         // Small enough to be precise if input is split into 16-bit words
-        mul_fft(result, lhs, rhs, n_pow, 16);
-      } else {
-        n_pow = get_fft_n_pow_12bit(lhs, rhs);
-        ensure(n_pow <= FFT_MAX_12BIT);  // XXX: how do we handle larger numbers?
-        mul_fft(result, lhs, rhs, n_pow, 12);
+        if (mul_fft(result, lhs, rhs, n_pow, 16)) {
+          return;
+        }
+        // Possibly malicious input, check failed
       }
-    } else if (lhs.data.size() * 2 < rhs.data.size()) {
+      // Have to use 12 bits
+      n_pow = get_fft_n_pow_12bit(lhs, rhs);
+      ensure(n_pow <= FFT_MAX_12BIT);  // XXX: how do we handle larger numbers?
+      if (mul_fft(result, lhs, rhs, n_pow, 12)) {
+        return;
+      }
+      // Possibly malicious input, check failed
+    }
+    if (lhs.data.size() * 2 < rhs.data.size()) {
       mul_disproportional(result, lhs, rhs);
     } else if (rhs.data.size() * 2 < lhs.data.size()) {
       mul_disproportional(result, rhs, lhs);
