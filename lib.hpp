@@ -25,14 +25,6 @@ constexpr void ensure(bool cond) {
   }
 }
 
-void memzero64(uint64_t* data, size_t count) {
-  asm volatile("rep stosq" : "+D"(data), "+c"(count) : "a"(0) : "memory");
-}
-
-void memcpy64(uint64_t* dst, const uint64_t* src, size_t count) {
-  asm volatile("rep movsq" : "+D"(dst), "+S"(src), "+c"(count) : : "memory");
-}
-
 struct EXPORT with_base {
   uint64_t base;
 };
@@ -46,16 +38,6 @@ class SmallVec {
   size_t _size;
   size_t _capacity;
   uint64_t _inline_storage[INLINE_STORAGE_SIZE];
-
-  void increase_capacity_to(size_t new_capacity) {
-    uint64_t* new_begin = new uint64_t[new_capacity];
-    memcpy64(new_begin, _begin, _size);
-    if (_begin != _inline_storage) {
-      delete[] _begin;
-    }
-    _begin = new_begin;
-    _capacity = new_capacity;
-  }
 
 public:
   SmallVec() : _begin(_inline_storage), _size(0), _capacity(INLINE_STORAGE_SIZE) {}
@@ -78,7 +60,7 @@ public:
       _begin = new uint64_t[size + 1];
       _capacity = size + 1;
     }
-    memcpy64(_begin, data, size);
+    memcpy(_begin, data, size * 8);
     _size = size;
   }
 
@@ -87,7 +69,7 @@ public:
   SmallVec(SmallVec&& rhs) {
     if (rhs._begin == rhs._inline_storage) {
       _begin = _inline_storage;
-      memcpy64(_begin, rhs._begin, rhs._size);
+      memcpy(_begin, rhs._begin, rhs._size * 8);
     } else {
       _begin = rhs._begin;
     }
@@ -107,7 +89,7 @@ public:
       _begin = _inline_storage;
       _capacity = INLINE_STORAGE_SIZE;
       _size = rhs._size;
-      memcpy64(_begin, rhs._begin, rhs._size);
+      memcpy(_begin, rhs._begin, rhs._size * 8);
     } else {
       _begin = rhs._begin;
       _size = rhs._size;
@@ -125,19 +107,28 @@ public:
     }
   }
 
+  void increase_capacity_to(size_t new_capacity) {
+    uint64_t* new_begin = new uint64_t[new_capacity];
+    memcpy(new_begin, _begin, _size * 8);
+    if (_begin != _inline_storage) {
+      delete[] _begin;
+    }
+    _begin = new_begin;
+    _capacity = new_capacity;
+  }
   void overwrite_zerofill_leaking(size_t size) {
     if (size > INLINE_STORAGE_SIZE) {
       _begin = new uint64_t[size];
       _capacity = size;
     }
-    memzero64(_begin, size);
+    memset(_begin, 0, size * 8);
     _size = size;
   }
   void increase_size_zerofill(size_t new_size) {
     if (_capacity < new_size) {
       increase_capacity_to(new_size);
     }
-    memzero64(_begin + _size, new_size - _size);
+    memset(_begin + _size, 0, (new_size - _size) * 8);
     _size = new_size;
   }
   void set_size(size_t size) { _size = size; }
@@ -268,7 +259,7 @@ SmallVec::SmallVec(ConstSpan rhs) {
     _begin = new uint64_t[rhs.size() + 1];
     _capacity = rhs.size() + 1;
   }
-  memcpy64(_begin, rhs.data(), rhs.size());
+  memcpy(_begin, rhs.data(), rhs.size() * 8);
   _size = rhs.size();
 }
 
@@ -282,7 +273,7 @@ SmallVec& SmallVec::operator=(ConstSpan rhs) {
     _begin = new uint64_t[rhs.size() + 1];
     _capacity = rhs.size() + 1;
   }
-  memcpy64(_begin, rhs.data(), rhs.size());
+  memcpy(_begin, rhs.data(), rhs.size() * 8);
   _size = rhs.size();
   return *this;
 }
@@ -681,7 +672,7 @@ struct ComplexSpan {
       i++;
       count--;
     }
-    memzero64(reinterpret_cast<uint64_t*>(data + i * 2), count * 2);
+    memset(data + i * 2, 0, count * 16);
   }
 };
 
@@ -752,8 +743,7 @@ void ensure_twiddle_factors(int want_n_pow) {
   size_t old_n = 1uz << cur_twiddles_n_pow;
   size_t new_n = 1uz << want_n_pow;
   ComplexArray new_twiddles_bitreversed(new_n / 2);
-  memcpy64(reinterpret_cast<uint64_t*>(new_twiddles_bitreversed.data),
-           reinterpret_cast<uint64_t*>(twiddles_bitreversed.data), old_n);
+  memcpy(new_twiddles_bitreversed.data, twiddles_bitreversed.data, old_n * 8);
   ::operator delete[](twiddles_bitreversed.data, std::align_val_t(64));
   twiddles_bitreversed = std::move(new_twiddles_bitreversed);
   double coeff = 2 * PI / static_cast<double>(new_n);
@@ -1128,7 +1118,7 @@ std::pair<ComplexArray, Mod> mul_fft_transform_input(ConstRef input, int n_pow, 
       // 48-bit word; it is safe to overread by 1 byte, and we mask it later with shifted 0xfff, so
       // no need to get rid of the top 16 bits
       uint64_t word;
-      std::memcpy(&word, &data[k * 3], 8);
+      memcpy(&word, &data[k * 3], 8);
       // Split into 12-bit parts
       write_words(
         _mm256_and_si256(
