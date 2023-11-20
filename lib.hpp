@@ -479,6 +479,76 @@ void add_to(Ref lhs, ConstRef rhs) {
       : "flags", "memory");
 }
 
+void add_into(Ref result, ConstRef lhs, ConstRef rhs) {
+  if (lhs.data.size() > rhs.data.size()) {
+    std::swap(lhs, rhs);
+  }
+
+  size_t offset = 0;
+  uint64_t value1, value2;
+
+  size_t unrolled_loop_count = lhs.data.size() / 4;
+  size_t left_loop_count = lhs.data.size() % 4;
+  if (left_loop_count == 0) {
+    unrolled_loop_count--;
+    left_loop_count = 4;
+  }
+
+  // Carryout from the last digit is rare, so don't unroll the loop
+  size_t inc_loop_count = rhs.data.size() - lhs.data.size();
+
+  asm volatile(
+      "test %[unrolled_loop_count], %[unrolled_loop_count];"
+      "jz 2f;"
+      "1:"
+      "mov (%[lhs_data_ptr],%[offset]), %[value1];"
+      "mov 0x8(%[lhs_data_ptr],%[offset]), %[value2];"
+      "adc (%[rhs_data_ptr],%[offset]), %[value1];"
+      "adc 0x8(%[rhs_data_ptr],%[offset]), %[value2];"
+      "mov %[value1], (%[result_data_ptr],%[offset]);"
+      "mov %[value2], 0x8(%[result_data_ptr],%[offset]);"
+      "mov 0x10(%[lhs_data_ptr],%[offset]), %[value1];"
+      "mov 0x18(%[lhs_data_ptr],%[offset]), %[value2];"
+      "adc 0x10(%[rhs_data_ptr],%[offset]), %[value1];"
+      "adc 0x18(%[rhs_data_ptr],%[offset]), %[value2];"
+      "mov %[value1], 0x10(%[result_data_ptr],%[offset]);"
+      "mov %[value2], 0x18(%[result_data_ptr],%[offset]);"
+      "lea 0x20(%[offset]), %[offset];"
+      "dec %[unrolled_loop_count];"
+      "jnz 1b;"
+      "2:"
+      "mov (%[lhs_data_ptr],%[offset]), %[value1];"
+      "adc (%[rhs_data_ptr],%[offset]), %[value1];"
+      "mov %[value1], (%[result_data_ptr],%[offset]);"
+      "lea 0x8(%[offset]), %[offset];"
+      "dec %[left_loop_count];"
+      "jnz 2b;"
+      "jnc 5f;"
+      "test %[inc_loop_count], %[inc_loop_count];"
+      "jz 4f;"
+      "3:"
+      "mov (%[rhs_data_ptr],%[offset]), %[value1];"
+      "add $1, %[value1];"
+      "mov %[value1], (%[result_data_ptr],%[offset]);"
+      "lea 0x8(%[offset]), %[offset];"
+      "jnc 5f;"
+      "dec %[inc_loop_count];"
+      "jnz 3b;"
+      "4:"
+      "movq $1, (%[result_data_ptr],%[offset]);"
+      "lea 0x8(%[offset]), %[offset];"
+      "5:"
+      : [offset] "+r"(offset), [value1] "=&r"(value1), [value2] "=&r"(value2),
+        [unrolled_loop_count] "+r"(unrolled_loop_count), [left_loop_count] "+r"(left_loop_count), [inc_loop_count] "+r"(inc_loop_count)
+      : [result_data_ptr] "r"(result.data.data()), [lhs_data_ptr] "r"(lhs.data.data()), [rhs_data_ptr] "r"(rhs.data.data())
+      : "flags", "memory");
+
+  if (offset <= rhs.data.size() * 8) {
+    memcpy(result.data.data() + offset / 8, rhs.data.data() + offset / 8, rhs.data.size() * 8 - offset);
+    result.data[rhs.data.size()] = 0;
+  }
+}
+
 inline constexpr int FFT_RECURSIVE = 10;
 inline constexpr int FFT_MAX_16BIT = 18;  // a bit less than 52 - 16 * 2
 inline constexpr int FFT_MAX_16BIT_RELIABLE = 16;  // 2 bits below known counter-example
@@ -1566,7 +1636,28 @@ BigInt BigInt::operator--(int) {
   return tmp;
 }
 
-BigInt operator+(BigInt lhs, ConstRef rhs) { return lhs += rhs; }
+BigInt operator+(BigInt&& lhs, ConstRef rhs) {
+  lhs += rhs;
+  return std::move(lhs);
+}
+BigInt operator+(ConstRef lhs, ConstRef rhs) {
+  if (lhs.data.empty()) {
+    return rhs;
+  } else if (rhs.data.empty()) {
+    return lhs;
+  }
+  size_t size = std::max(lhs.data.size(), rhs.data.size());
+  BigInt result;
+  result.data.increase_capacity_to(size + 1);
+  add_into(result, lhs, rhs);
+  size += result.data[size] != 0;
+  result.data.set_size(size);
+  return result;
+}
+BigInt operator+(const BigInt& lhs, ConstRef rhs) {
+  return ConstRef(lhs) + rhs;
+}
+
 BigInt operator-(BigInt lhs, ConstRef rhs) { return lhs -= rhs; }
 
 BigInt& operator*=(BigInt& lhs, uint64_t rhs) {
