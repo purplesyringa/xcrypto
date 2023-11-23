@@ -22,12 +22,12 @@ int main() {
     std::cerr << bits << " bits: GMP: ";
     std::cout << bits << '\t';
     measure([&]() {
-      (mpz_class)(a_gmp * b_gmp);
+      (mpz_class)(a_gmp + b_gmp);
     });
     std::cerr << ", xcrypto: ";
     std::cout << '\t';
     measure([&]() {
-      a_xcrypto * b_xcrypto;
+      a_xcrypto + b_xcrypto;
     });
     std::cerr << std::endl;
     std::cout << std::endl;
